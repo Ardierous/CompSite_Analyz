@@ -1,0 +1,64 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Анализ корпоративных сайтов</title>
+    <link rel="stylesheet" href="{{ url_for('static', filename='style.css') }}">
+</head>
+<body>
+    <div class="container">
+        <div class="header">
+            <h1>Анализ корпоративных сайтов</h1>
+            <p class="subtitle">Введите URL сайта для комплексного анализа компании</p>
+        </div>
+        
+        <div class="form-container">
+            <form id="analysisForm">
+                <div class="input-group">
+                    <input 
+                        type="text" 
+                        id="urlInput" 
+                        placeholder="https://example.com" 
+                        required
+                        autocomplete="off"
+                    >
+                    <button type="submit" id="submitBtn">
+                        <span class="btn-text">Запустить анализ</span>
+                        <span class="btn-loader" style="display: none;"></span>
+                    </button>
+                </div>
+            </form>
+        </div>
+        
+        <div id="statusContainer" class="status-container" style="display: none;">
+            <div class="status-header">
+                <h2>Статус анализа</h2>
+                <span id="statusMessage" class="status-message"></span>
+            </div>
+            <div class="progress-bar">
+                <div id="progressFill" class="progress-fill"></div>
+            </div>
+            <div id="progressText" class="progress-text">0%</div>
+        </div>
+        
+        <div id="resultContainer" class="result-container" style="display: none;">
+            <div class="result-header">
+                <h2>Результаты анализа</h2>
+                <button id="closeResult" class="close-btn">×</button>
+            </div>
+            <div id="resultContent" class="result-content"></div>
+        </div>
+        
+        <div id="errorContainer" class="error-container" style="display: none;">
+            <div class="error-message">
+                <span id="errorText"></span>
+                <button id="closeError" class="close-btn">×</button>
+            </div>
+        </div>
+    </div>
+    
+    <script src="{{ url_for('static', filename='script.js') }}"></script>
+</body>
+</html>
+
