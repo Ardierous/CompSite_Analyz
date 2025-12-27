@@ -16,7 +16,10 @@ ENV PYTHONUNBUFFERED=1 \
     FLASK_DEBUG=False
 
 # Создаем non-root пользователя для безопасности
-RUN groupadd -r appuser && useradd -r -g appuser appuser
+RUN groupadd -r appuser && \
+    useradd -r -g appuser -m -d /home/appuser appuser && \
+    mkdir -p /home/appuser && \
+    chown -R appuser:appuser /home/appuser
 
 # Устанавливаем рабочую директорию
 WORKDIR /app
@@ -26,10 +29,15 @@ COPY requirements.txt .
 
 # Устанавливаем зависимости
 RUN pip install --no-cache-dir --upgrade pip && \
-    pip install --no-cache-dir -r requirements.txt
+    pip install --no-cache-dir -r requirements.txt && \
+    pip install --no-cache-dir --force-reinstall "numpy<2.0" && \
+    python -c "import numpy; print(f'NumPy version: {numpy.__version__}')"
 
-# Копируем остальные файлы проекта
+# Копируем остальные файлы проекта (исключая .env через .dockerignore)
 COPY . .
+
+# Убеждаемся, что .env не попал в образ (дополнительная проверка)
+RUN if [ -f .env ]; then rm -f .env; fi
 
 # Создаем директорию для логов и даем права пользователю
 RUN mkdir -p /app/logs && \

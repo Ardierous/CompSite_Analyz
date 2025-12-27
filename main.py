@@ -11,6 +11,14 @@ import json
 from pathlib import Path
 warnings.filterwarnings('ignore')
 
+# Загрузка переменных окружения из .env файла
+try:
+    from dotenv import load_dotenv
+    load_dotenv()
+except ImportError:
+    # Если python-dotenv не установлен, используем только переменные окружения системы
+    pass
+
 # Вспомогательная функция для записи в debug.log (опционально)
 def write_debug_log(data):
     """Безопасно записывает данные в debug.log, если файл доступен"""
@@ -64,7 +72,7 @@ app = Flask(__name__)
 CORS(app)
 
 # Конфигурация
-FLASK_HOST = os.getenv('FLASK_HOST', '127.0.0.1')
+FLASK_HOST = os.getenv('FLASK_HOST', '0.0.0.0')
 FLASK_PORT = int(os.getenv('FLASK_PORT', 5000))
 FLASK_DEBUG = os.getenv('FLASK_DEBUG', 'True').lower() == 'true'
 

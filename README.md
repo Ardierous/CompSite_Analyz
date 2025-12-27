@@ -95,8 +95,14 @@ pip install -r requirements.txt
 
 4. **Настройте переменные окружения**:
    
-   Создайте файл `.env` в корне проекта:
+   Создайте файл `.env` в корне проекта (используйте `.env.example` как шаблон):
+   ```bash
+   # Скопируйте пример файла
+   cp .env.example .env
    ```
+   
+   Затем отредактируйте `.env` и укажите свои значения:
+   ```env
    # Ключ ProxyAPI (можно использовать OPENAI_API_KEY или PROXYAPI_KEY)
    OPENAI_API_KEY=your_proxyapi_key_here
    OPENAI_API_BASE=https://api.proxyapi.ru/openai/v1
@@ -112,6 +118,12 @@ pip install -r requirements.txt
    - Выберите ваш ключ и нажмите "Редактировать"
    - Включите разрешение "Запрос баланса"
    - Без этого разрешения стоимость анализа не будет отображаться
+   
+   **Безопасность:**
+   - Файл `.env` автоматически исключен из Git (указан в `.gitignore`)
+   - Никогда не коммитьте файл `.env` в репозиторий
+   - Ключи API передаются только через переменные окружения
+   - В Docker образе `.env` не копируется (исключен через `.dockerignore`)
 
 ## Запуск
 
@@ -135,6 +147,25 @@ http://localhost:5000
 
 ### Запуск в Docker
 
+#### Вариант 1: Использование образа из Docker Hub (рекомендуется для продакшена)
+
+```bash
+# Используйте готовый образ из Docker Hub
+docker-compose -f docker-compose.prod.yml up -d
+```
+
+Или напрямую:
+```bash
+docker run -d \
+  --name comp-site-analyz \
+  -p 5000:5000 \
+  --env-file .env \
+  --restart unless-stopped \
+  avardous/comp_site_analyz:latest
+```
+
+#### Вариант 2: Локальная сборка для разработки
+
 1. **Соберите Docker образ**:
 ```bash
 docker build -t company-analyzer .
@@ -145,7 +176,7 @@ docker build -t company-analyzer .
 docker run -p 5000:5000 --env-file .env company-analyzer
 ```
 
-   Или используйте Docker Compose:
+   Или используйте Docker Compose (с hot reload):
    ```bash
    docker-compose up
    ```
@@ -155,7 +186,11 @@ docker run -p 5000:5000 --env-file .env company-analyzer
 http://localhost:5000
 ```
 
-**Примечание:** Docker автоматически использует Python 3.11 из официального образа `python:3.11-slim`.
+**Примечания:**
+- Docker автоматически использует Python 3.11 из официального образа `python:3.11-slim`
+- `docker-compose.yml` настроен для разработки с hot reload (изменения применяются автоматически)
+- `docker-compose.prod.yml` использует опубликованный образ из Docker Hub
+- Образ доступен на: https://hub.docker.com/r/avardous/comp_site_analyz
 
 ## Отправка кода в GitHub
 

@@ -80,37 +80,70 @@ python push_to_dockerhub.py
 
 ## Использование опубликованного образа
 
-### Запуск образа локально
+После успешной публикации образа на Docker Hub, вы можете использовать его несколькими способами:
+
+### Вариант 1: Использование docker-compose.prod.yml (рекомендуется)
+
+Для продакшена используйте готовый файл `docker-compose.prod.yml`:
 
 ```bash
-docker run -p 5000:5000 \
-  --env-file .env \
-  ваш-username/company-analyzer:latest
+docker-compose -f docker-compose.prod.yml up -d
 ```
 
-### Использование в docker-compose.yml
+Этот файл использует опубликованный образ `avardous/comp_site_analyz:latest` из Docker Hub.
 
-Обновите `docker-compose.yml`:
+### Вариант 2: Запуск образа напрямую
+
+```bash
+docker run -d \
+  --name comp-site-analyz \
+  -p 5000:5000 \
+  --env-file .env \
+  --restart unless-stopped \
+  avardous/comp_site_analyz:latest
+```
+
+Или с конкретной версией:
+```bash
+docker run -d \
+  --name comp-site-analyz \
+  -p 5000:5000 \
+  --env-file .env \
+  --restart unless-stopped \
+  avardous/comp_site_analyz:20251227-163644
+```
+
+### Вариант 3: Обновление docker-compose.yml
+
+Если хотите использовать образ из Docker Hub в основном `docker-compose.yml`, закомментируйте `build` и раскомментируйте `image`:
 
 ```yaml
-version: '3.8'
-
 services:
   web:
-    image: ваш-username/company-analyzer:latest
-    ports:
-      - "5000:5000"
-    environment:
-      - FLASK_ENV=production
-    env_file:
-      - .env
-    restart: unless-stopped
+    # build: .
+    image: avardous/comp_site_analyz:latest
+    # ... остальные настройки
 ```
 
-Затем запустите:
+### Обновление образа
+
+Для получения последней версии образа:
+
 ```bash
-docker-compose up
+# Остановите контейнер
+docker-compose -f docker-compose.prod.yml down
+
+# Обновите образ
+docker pull avardous/comp_site_analyz:latest
+
+# Запустите снова
+docker-compose -f docker-compose.prod.yml up -d
 ```
+
+### Разница между режимами
+
+- **docker-compose.yml** - для разработки (hot reload, локальная сборка)
+- **docker-compose.prod.yml** - для продакшена (образ из Docker Hub, без hot reload)
 
 ### Запуск на удаленном сервере
 
