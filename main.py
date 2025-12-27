@@ -46,6 +46,23 @@ def print_blue(text):
     """Выводит текст синим цветом"""
     print(f"{Colors.BLUE}{text}{Colors.RESET}")
 
+def is_running_in_docker():
+    """Проверяет, запущено ли приложение в контейнере Docker"""
+    # Проверяем наличие файла /.dockerenv (стандартный способ)
+    if Path('/.dockerenv').exists():
+        return True
+    # Проверяем переменную окружения (если установлена)
+    if os.getenv('DOCKER_CONTAINER') == 'true':
+        return True
+    # Проверяем cgroup (альтернативный способ)
+    try:
+        with open('/proc/self/cgroup', 'r') as f:
+            if 'docker' in f.read():
+                return True
+    except:
+        pass
+    return False
+
 def check_port_in_use(host, port):
     """Проверяет, занят ли порт"""
     sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
@@ -88,8 +105,21 @@ def kill_process(pid):
         logger.warning(f"Не удалось завершить процесс {pid}: {e}")
         return False
 
-def kill_process_on_port(port):
-    """Завершает все процессы, использующие указанный порт"""
+def kill_process_on_port(port, exclude_pid=None):
+    """Завершает все процессы, использующие указанный порт
+    
+    Args:
+        port: Порт для проверки
+        exclude_pid: PID процесса, который нужно исключить из проверки (текущий процесс)
+    """
+    # В контейнере Docker не проверяем порт - Docker сам управляет портами
+    if is_running_in_docker():
+        logger.info("Запуск в контейнере Docker - пропускаем проверку порта")
+        return False
+    
+    if exclude_pid is None:
+        exclude_pid = os.getpid()  # Исключаем текущий процесс
+    
     killed_count = 0
     try:
         if platform.system() == 'Windows':
@@ -117,20 +147,48 @@ def kill_process_on_port(port):
                     print_red(f"✓ Завершен процесс с PID {pid}, занимавший порт {port}")
                     killed_count += 1
         else:
-            # Linux/Mac: используем lsof и kill
+            # Linux/Mac: используем ss или netstat (более универсально, чем lsof)
+            # Сначала пробуем ss (более современная утилита)
             result = subprocess.run(
-                ['lsof', '-ti', f':{port}'],
+                ['ss', '-tlnp'],
                 capture_output=True,
                 text=True
             )
             if result.returncode == 0:
-                pids = result.stdout.strip().split('\n')
-                for pid in pids:
-                    if pid and pid.isdigit():
-                        if kill_process(pid):
-                            logger.info(f"Завершен процесс с PID {pid}, занимавший порт {port}")
-                            print_red(f"✓ Завершен процесс с PID {pid}, занимавший порт {port}")
-                            killed_count += 1
+                # Парсим вывод ss
+                import re
+                for line in result.stdout.split('\n'):
+                    if f':{port}' in line and 'LISTEN' in line:
+                        # Извлекаем PID из строки (формат: pid=12345)
+                        pid_match = re.search(r'pid=(\d+)', line)
+                        if pid_match:
+                            pid = pid_match.group(1)
+                            # Исключаем текущий процесс и его дочерние процессы
+                            if pid != str(exclude_pid) and kill_process(pid):
+                                logger.info(f"Завершен процесс с PID {pid}, занимавший порт {port}")
+                                print_red(f"✓ Завершен процесс с PID {pid}, занимавший порт {port}")
+                                killed_count += 1
+            else:
+                # Если ss недоступен, пробуем netstat
+                result = subprocess.run(
+                    ['netstat', '-tlnp'],
+                    capture_output=True,
+                    text=True
+                )
+                if result.returncode == 0:
+                    for line in result.stdout.split('\n'):
+                        if f':{port}' in line and 'LISTEN' in line:
+                            parts = line.split()
+                            # PID обычно в последнем столбце, формат: 12345/python
+                            if len(parts) > 0:
+                                last_part = parts[-1]
+                                pid = last_part.split('/')[0]
+                                if pid.isdigit() and pid != str(exclude_pid):
+                                    # Исключаем текущий процесс и его дочерние процессы
+                                    if kill_process(pid):
+                                        logger.info(f"Завершен процесс с PID {pid}, занимавший порт {port}")
+                                        print_red(f"✓ Завершен процесс с PID {pid}, занимавший порт {port}")
+                                        killed_count += 1
     except Exception as e:
         logger.error(f"Ошибка при попытке завершить процесс на порту {port}: {e}")
         print(f"⚠ Предупреждение: не удалось автоматически завершить процесс на порту {port}")
@@ -873,43 +931,71 @@ if __name__ == '__main__':
         # ========================================================================
         # ШАГ 2: Дополнительная проверка - занят ли порт
         # ========================================================================
-        # Проверяем порт на случай, если PID файл был удален, но процесс еще работает
-        # или если другой процесс использует порт 5000
-        check_host = FLASK_HOST if FLASK_HOST != '0.0.0.0' else '127.0.0.1'
-        import time
-        
-        # Проверяем порт несколько раз с попытками завершения
-        # Увеличено количество попыток для более надежного освобождения порта
-        max_attempts = 10
-        for attempt in range(max_attempts):
-            if check_port_in_use(check_host, FLASK_PORT):
-                if attempt == 0:
-                    logger.warning(f"Порт {FLASK_PORT} уже занят. Принудительно завершаю предыдущий процесс...")
-                    print_yellow(f"⚠ Порт {FLASK_PORT} уже занят. Принудительно завершаю предыдущий процесс...")
+        # В контейнере Docker пропускаем проверку порта - Docker сам управляет портами
+        # В debug режиме Flask reloader создаст дочерний процесс, который займет порт - это нормально
+        # Поэтому в debug режиме проверяем порт только один раз, перед запуском Flask
+        if not is_running_in_docker() and not FLASK_DEBUG:
+            # Проверяем порт только если debug отключен (нет Flask reloader)
+            # Проверяем порт на случай, если PID файл был удален, но процесс еще работает
+            # или если другой процесс использует порт 5000
+            check_host = FLASK_HOST if FLASK_HOST != '0.0.0.0' else '127.0.0.1'
+            import time
+            
+            # Проверяем порт несколько раз с попытками завершения
+            # Увеличено количество попыток для более надежного освобождения порта
+            max_attempts = 10
+            for attempt in range(max_attempts):
+                if check_port_in_use(check_host, FLASK_PORT):
+                    if attempt == 0:
+                        logger.warning(f"Порт {FLASK_PORT} уже занят. Принудительно завершаю предыдущий процесс...")
+                        print_yellow(f"⚠ Порт {FLASK_PORT} уже занят. Принудительно завершаю предыдущий процесс...")
+                    else:
+                        logger.warning(f"Порт {FLASK_PORT} все еще занят (попытка {attempt + 1}/{max_attempts}). Повторная попытка завершения...")
+                        print_yellow(f"⚠ Порт {FLASK_PORT} все еще занят. Повторная попытка завершения (попытка {attempt + 1}/{max_attempts})...")
+                    
+                    # Исключаем текущий процесс из проверки
+                    kill_process_on_port(FLASK_PORT, exclude_pid=os.getpid())
+                    
+                    # Ждем, чтобы порт освободился (увеличено время ожидания для надежности)
+                    time.sleep(3)  # Увеличено с 2 до 3 секунд
+                    
+                    # Проверяем снова
+                    if not check_port_in_use(check_host, FLASK_PORT):
+                        logger.info(f"Порт {FLASK_PORT} успешно освобожден после {attempt + 1} попыток")
+                        print_green(f"✓ Порт {FLASK_PORT} успешно освобожден после {attempt + 1} попыток")
+                        break
                 else:
-                    logger.warning(f"Порт {FLASK_PORT} все еще занят (попытка {attempt + 1}/{max_attempts}). Повторная попытка завершения...")
-                    print_yellow(f"⚠ Порт {FLASK_PORT} все еще занят. Повторная попытка завершения (попытка {attempt + 1}/{max_attempts})...")
-                
-                kill_process_on_port(FLASK_PORT)
-                
-                # Ждем, чтобы порт освободился (увеличено время ожидания для надежности)
-                time.sleep(3)  # Увеличено с 2 до 3 секунд
-                
-                # Проверяем снова
-                if not check_port_in_use(check_host, FLASK_PORT):
-                    logger.info(f"Порт {FLASK_PORT} успешно освобожден после {attempt + 1} попыток")
-                    print_green(f"✓ Порт {FLASK_PORT} успешно освобожден после {attempt + 1} попыток")
+                    # Порт свободен, можно запускать
                     break
             else:
-                # Порт свободен, можно запускать
-                break
+                # Все попытки исчерпаны, порт все еще занят
+                logger.error(f"Порт {FLASK_PORT} все еще занят после {max_attempts} попыток завершения процесса")
+                print_red(f"❌ Ошибка: порт {FLASK_PORT} все еще занят после {max_attempts} попыток.")
+                print_red(f"   Закройте приложение вручную или измените порт в переменных окружения.")
+                print_red(f"   Используйте скрипт scripts/stop_app.py для принудительного завершения.")
+                sys.exit(1)
+        elif not is_running_in_docker() and FLASK_DEBUG:
+            # В debug режиме проверяем порт только один раз, перед запуском Flask
+            # Flask reloader создаст дочерний процесс, который займет порт - это нормально
+            # Проверяем только, не занят ли порт другим процессом (не нашим)
+            check_host = FLASK_HOST if FLASK_HOST != '0.0.0.0' else '127.0.0.1'
+            if check_port_in_use(check_host, FLASK_PORT):
+                # Проверяем, не занят ли порт другим процессом (не нашим)
+                # Исключаем текущий процесс из проверки
+                killed = kill_process_on_port(FLASK_PORT, exclude_pid=os.getpid())
+                if killed:
+                    import time
+                    time.sleep(1)  # Небольшая пауза для освобождения порта
+                    logger.info("Освобожден порт от предыдущего процесса")
+                    print_green("✓ Освобожден порт от предыдущего процесса")
+                else:
+                    # Порт занят, но это может быть наш дочерний процесс от предыдущего запуска
+                    # Или другой процесс - проверяем через PID файл (уже сделано в ШАГ 1)
+                    logger.info("Порт занят, но это может быть нормально в debug режиме (Flask reloader)")
+                    print("ℹ Порт занят - в debug режиме Flask reloader создаст дочерний процесс")
         else:
-            # Все попытки исчерпаны, порт все еще занят
-            logger.error(f"Порт {FLASK_PORT} все еще занят после {max_attempts} попыток завершения процесса")
-            print_red(f"❌ Ошибка: порт {FLASK_PORT} все еще занят после {max_attempts} попыток.")
-            print_red(f"   Закройте приложение вручную или измените порт в переменных окружения.")
-            print_red(f"   Используйте скрипт scripts/stop_app.py для принудительного завершения.")
-            sys.exit(1)
+            logger.info("Запуск в контейнере Docker - пропускаем проверку порта (Docker управляет портами)")
+            print("ℹ Запуск в контейнере Docker - проверка порта не требуется")
         
         # ШАГ 3: Создаем PID файл для текущего экземпляра ПЕРЕД запуском
         # Это важно - флаг должен быть установлен до того, как приложение начнет слушать порт

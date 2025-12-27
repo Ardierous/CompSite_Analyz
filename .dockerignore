@@ -37,7 +37,8 @@ logs/
 .env.local
 .env.*.local
 
-# Результаты анализа
+# Результаты анализа (будут создаваться в контейнере)
+tasks/
 task_*.md
 crew_output.md
 
@@ -63,10 +64,9 @@ README.md
 *.swp
 *.swo
 
-# Скрипты разработки
-push_to_github.py
-push_git.bat
-GIT_SETUP.md
+# Скрипты разработки (теперь в scripts/)
+scripts/
+!scripts/docker-compose*.yml
 
 # Тесты
 .pytest_cache/
