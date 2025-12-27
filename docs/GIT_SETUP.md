@@ -60,12 +60,13 @@ git push -u origin main
 ## Шаг 3: Проверка
 
 После выполнения команд проверьте:
+
 - Откройте https://github.com/YOUR_USERNAME/CompSite_Analyz
 - Убедитесь, что все файлы загружены
 
 ## Альтернативный способ (через скрипт)
 
-Запустите файл `push_git.bat` двойным кликом. Он автоматически выполнит все необходимые шаги.
+Запустите файл `scripts/push_git.bat` двойным кликом. Он автоматически выполнит все необходимые шаги.
 
 ## Важные замечания
 
@@ -78,18 +79,22 @@ git push -u origin main
 ## Если возникли проблемы
 
 ### Ошибка: "remote origin already exists"
+
 ```bash
 git remote remove origin
 git remote add origin https://github.com/YOUR_USERNAME/CompSite_Analyz.git
 ```
 
 ### Ошибка аутентификации
+
 Используйте Personal Access Token вместо пароля:
+
 1. GitHub → Settings → Developer settings → Personal access tokens → Tokens (classic)
 2. Создайте новый token с правами `repo`
 3. Используйте token как пароль при push
 
 ### Ошибка: "failed to push some refs"
+
 ```bash
 git pull origin main --allow-unrelated-histories
 git push -u origin main

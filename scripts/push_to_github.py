@@ -8,6 +8,7 @@ import subprocess
 import sys
 import os
 import shlex
+from pathlib import Path
 
 # Установка кодировки UTF-8 для Windows консоли
 if sys.platform == 'win32':
@@ -44,6 +45,10 @@ if sys.platform == 'win32':
     except:
         pass
 
+# Изменяем рабочую директорию на корень проекта (на уровень выше scripts/)
+PROJECT_ROOT = Path(__file__).parent.parent
+os.chdir(PROJECT_ROOT)
+
 # Конфигурация репозитория
 GITHUB_USERNAME = "Ardierous"
 REPO_NAME = "CompSite_Analyz"
@@ -68,7 +73,8 @@ def run_command(command, description, silent=False):
             capture_output=True,
             text=True,
             encoding='utf-8',
-            errors='replace'  # Заменяем неверные символы вместо ошибки
+            errors='replace',  # Заменяем неверные символы вместо ошибки
+            cwd=PROJECT_ROOT
         )
         if result.stdout and not silent:
             print(result.stdout.strip())
@@ -92,7 +98,7 @@ def check_git_installed():
 
 def check_git_repo():
     """Проверяет, инициализирован ли Git репозиторий"""
-    if not os.path.exists('.git'):
+    if not (PROJECT_ROOT / '.git').exists():
         print("Git репозиторий не инициализирован. Инициализация...")
         if not run_command("git init", "Инициализация Git репозитория"):
             return False
@@ -107,7 +113,8 @@ def setup_remote():
         "git remote get-url origin",
         shell=True,
         capture_output=True,
-        text=True
+        text=True,
+        cwd=PROJECT_ROOT
     )
     
     if result.returncode == 0:
@@ -173,7 +180,8 @@ def check_changes():
         "git status --porcelain",
         shell=True,
         capture_output=True,
-        text=True
+        text=True,
+        cwd=PROJECT_ROOT
     )
     return bool(result.stdout.strip())
 
@@ -223,7 +231,8 @@ def main():
                 stdout=subprocess.PIPE,
                 stderr=subprocess.PIPE,
                 text=True,
-                encoding='utf-8'
+                encoding='utf-8',
+                cwd=PROJECT_ROOT
             )
             stdout, stderr = commit_process.communicate()
             

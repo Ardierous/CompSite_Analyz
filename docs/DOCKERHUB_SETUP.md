@@ -19,16 +19,19 @@
 ### Вариант 1: Использование скрипта (рекомендуется)
 
 #### Windows:
+
 ```bash
-push_dockerhub.bat
+scripts/push_dockerhub.bat
 ```
 
 #### Linux/Mac:
+
 ```bash
-python3 push_to_dockerhub.py
+python3 scripts/push_to_dockerhub.py
 ```
 
 Скрипт автоматически:
+
 1. Соберет Docker образ
 2. Попросит ввести данные для входа в Docker Hub
 3. Опубликует образ на Docker Hub
@@ -74,8 +77,9 @@ export DOCKER_TAG="v1.0.0"
 ```
 
 Затем запустите скрипт:
+
 ```bash
-python push_to_dockerhub.py
+python scripts/push_to_dockerhub.py
 ```
 
 ## Использование опубликованного образа
@@ -84,10 +88,10 @@ python push_to_dockerhub.py
 
 ### Вариант 1: Использование docker-compose.prod.yml (рекомендуется)
 
-Для продакшена используйте готовый файл `docker-compose.prod.yml`:
+Для продакшена используйте готовый файл `scripts/docker-compose.prod.yml`:
 
 ```bash
-docker-compose -f docker-compose.prod.yml up -d
+docker-compose -f scripts/docker-compose.prod.yml up -d
 ```
 
 Этот файл использует опубликованный образ `avardous/comp_site_analyz:latest` из Docker Hub.
@@ -104,6 +108,7 @@ docker run -d \
 ```
 
 Или с конкретной версией:
+
 ```bash
 docker run -d \
   --name comp-site-analyz \
@@ -115,7 +120,7 @@ docker run -d \
 
 ### Вариант 3: Обновление docker-compose.yml
 
-Если хотите использовать образ из Docker Hub в основном `docker-compose.yml`, закомментируйте `build` и раскомментируйте `image`:
+Если хотите использовать образ из Docker Hub в основном `scripts/docker-compose.yml`, закомментируйте `build` и раскомментируйте `image`:
 
 ```yaml
 services:
@@ -131,28 +136,30 @@ services:
 
 ```bash
 # Остановите контейнер
-docker-compose -f docker-compose.prod.yml down
+docker-compose -f scripts/docker-compose.prod.yml down
 
 # Обновите образ
 docker pull avardous/comp_site_analyz:latest
 
 # Запустите снова
-docker-compose -f docker-compose.prod.yml up -d
+docker-compose -f scripts/docker-compose.prod.yml up -d
 ```
 
 ### Разница между режимами
 
-- **docker-compose.yml** - для разработки (hot reload, локальная сборка)
-- **docker-compose.prod.yml** - для продакшена (образ из Docker Hub, без hot reload)
+- **scripts/docker-compose.yml** - для разработки (hot reload, локальная сборка)
+- **scripts/docker-compose.prod.yml** - для продакшена (образ из Docker Hub, без hot reload)
 
 ### Запуск на удаленном сервере
 
 1. Войдите в Docker Hub на сервере:
+
    ```bash
    docker login
    ```
 
 2. Запустите образ:
+
    ```bash
    docker run -d \
      --name company-analyzer \
@@ -196,20 +203,24 @@ docker push ваш-username/company-analyzer:latest
 ## Проверка опубликованного образа
 
 После публикации проверьте образ на Docker Hub:
+
 - Откройте: `https://hub.docker.com/r/ваш-username/company-analyzer`
 - Убедитесь, что образ виден и доступен для скачивания
 
 ## Устранение проблем
 
 ### Ошибка: "denied: requested access to the resource is denied"
+
 - Убедитесь, что вы вошли в Docker Hub: `docker login`
 - Проверьте, что имя репозитория соответствует вашему username
 
 ### Ошибка: "unauthorized: authentication required"
+
 - Проверьте правильность username и пароля
 - Для безопасности используйте токен доступа вместо пароля
 
 ### Ошибка при сборке образа
+
 - Проверьте, что Dockerfile находится в корне проекта
 - Убедитесь, что все необходимые файлы присутствуют
 - Проверьте логи сборки: `docker build --no-cache -t test .`
@@ -217,6 +228,7 @@ docker push ваш-username/company-analyzer:latest
 ## Безопасность
 
 ⚠️ **Важно:**
+
 - Никогда не публикуйте файлы с секретами (`.env`, ключи API)
 - Используйте `.dockerignore` для исключения чувствительных файлов
 - Используйте Docker secrets или переменные окружения для секретов

@@ -61,6 +61,7 @@ dmypy.json
 
 # CrewAI generated files
 task_*.md
+tasks/task_*.md
 crew_output.md
 
 # Temporary files

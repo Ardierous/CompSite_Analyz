@@ -1,11 +1,56 @@
-from crewai import Agent, Task, Crew, Process
 import os
 import json
 from datetime import datetime
 from pathlib import Path
 
+# ВАЖНО: Отключаем телеметрию CrewAI ДО импорта модуля
+# Это должно быть сделано до загрузки dotenv, чтобы переменные были установлены как можно раньше
+os.environ["CREWAI_TELEMETRY_OPT_OUT"] = "1"
+os.environ["CREWAI_TRACING_ENABLED"] = "false"
+
+# Загружаем переменные окружения до импорта CrewAI
 from dotenv import load_dotenv
 load_dotenv()
+
+# Убеждаемся, что телеметрия отключена (на случай, если .env переопределил значения)
+os.environ["CREWAI_TELEMETRY_OPT_OUT"] = "1"
+os.environ["CREWAI_TRACING_ENABLED"] = "false"
+
+# Импортируем CrewAI с обработкой ошибок
+# #region agent log
+try:
+    import json
+    import os
+    from pathlib import Path
+    debug_log_path = Path(__file__).parent / '.cursor' / 'debug.log'
+    with open(debug_log_path, 'a', encoding='utf-8') as f:
+        f.write(json.dumps({"sessionId":"debug-session","runId":"init","hypothesisId":"A","location":"Agents_crew.py:12","message":"Попытка импорта CrewAI","data":{"timestamp":__import__('datetime').datetime.now().isoformat()}})+'\n')
+except: pass
+# #endregion
+try:
+    from crewai import Agent, Task, Crew, Process
+    CREWAI_IMPORTED = True
+    # #region agent log
+    try:
+        with open(debug_log_path, 'a', encoding='utf-8') as f:
+            f.write(json.dumps({"sessionId":"debug-session","runId":"init","hypothesisId":"A","location":"Agents_crew.py:15","message":"CrewAI успешно импортирован","data":{"CREWAI_IMPORTED":True,"timestamp":__import__('datetime').datetime.now().isoformat()}})+'\n')
+    except: pass
+    # #endregion
+except ImportError as e:
+    CREWAI_IMPORTED = False
+    # #region agent log
+    try:
+        with open(debug_log_path, 'a', encoding='utf-8') as f:
+            f.write(json.dumps({"sessionId":"debug-session","runId":"init","hypothesisId":"A","location":"Agents_crew.py:18","message":"Ошибка импорта CrewAI","data":{"error":str(e),"CREWAI_IMPORTED":False,"timestamp":__import__('datetime').datetime.now().isoformat()}})+'\n')
+    except: pass
+    # #endregion
+    print(f"ОШИБКА: Не удалось импортировать CrewAI: {e}")
+    print("Убедитесь, что crewai установлен: pip install crewai>=0.11.2")
+    # Создаем заглушки для избежания ошибок при импорте модуля
+    Agent = None
+    Task = None
+    Crew = None
+    Process = None
 
 # Вспомогательная функция для записи в debug.log (опционально)
 def write_debug_log(data):
@@ -55,7 +100,7 @@ write_debug_log({
 })
 # #endregion
 
-# Отключение телеметрии CrewAI
+# Телеметрия уже отключена в начале файла, но убеждаемся еще раз
 os.environ["CREWAI_TELEMETRY_OPT_OUT"] = "1"
 os.environ["CREWAI_TRACING_ENABLED"] = "false"
 
@@ -65,7 +110,7 @@ write_debug_log({
     "runId": "init",
     "hypothesisId": "C",
     "location": "Agents_crew.py:22",
-    "message": "Установка переменных для отключения телеметрии",
+    "message": "Проверка переменных для отключения телеметрии",
     "data": {
         "CREWAI_TELEMETRY_OPT_OUT": os.environ.get("CREWAI_TELEMETRY_OPT_OUT"),
         "CREWAI_TRACING_ENABLED": os.environ.get("CREWAI_TRACING_ENABLED"),
@@ -79,11 +124,44 @@ if api_key:
 if api_base:
     os.environ["OPENAI_API_BASE"] = api_base
 
-# ============================================================================
-# АГЕНТ 1: Web Scraper (Считыватель информации с корпоративного сайта)
-# ============================================================================
+# Инициализируем переменные по умолчанию
+# ВАЖНО: При повторном импорте модуля (Flask reloader) все переменные сбрасываются
+# Поэтому crew будет пересоздан при каждом импорте, что нормально
+web_scraper_agent = None
+data_analyzer_agent = None
+bi_engineer_agent = None
+task_1_scrape = None
+task_2_analyze = None
+task_3_report = None
+crew = None
 
-web_scraper_agent = Agent(
+# Проверяем, что это дочерний процесс Flask reloader (рабочий сервер)
+# WERKZEUG_RUN_MAIN устанавливается Flask только в дочернем процессе
+# Это предотвращает создание агентов дважды (в основном и дочернем процессе)
+is_werkzeug_main = os.environ.get('WERKZEUG_RUN_MAIN') == 'true'
+FLASK_DEBUG = os.getenv('FLASK_DEBUG', 'True').lower() == 'true'
+
+# Проверяем, что CrewAI импортирован
+if not CREWAI_IMPORTED:
+    print("ОШИБКА: CrewAI не установлен. Установите: pip install crewai>=0.11.2")
+    # Не выбрасываем исключение, чтобы main.py мог обработать ошибку
+elif not is_werkzeug_main and FLASK_DEBUG:
+    # Если это основной процесс Flask reloader (не дочерний), не создаем агентов
+    # Они будут созданы в дочернем процессе
+    print("ℹ Flask reloader: пропускаем создание агентов в основном процессе")
+else:
+    # ============================================================================
+    # АГЕНТ 1: Web Scraper (Считыватель информации с корпоративного сайта)
+    # ============================================================================
+    
+    try:
+        # #region agent log
+        try:
+            with open(debug_log_path, 'a', encoding='utf-8') as f:
+                f.write(json.dumps({"sessionId":"debug-session","runId":"init","hypothesisId":"B","location":"Agents_crew.py:108","message":"Создание Web Scraper Agent","data":{"CREWAI_IMPORTED":CREWAI_IMPORTED,"Agent_class":str(Agent) if Agent else None,"timestamp":__import__('datetime').datetime.now().isoformat()}})+'\n')
+        except: pass
+        # #endregion
+        web_scraper_agent = Agent(
     role="Corporate Web Information Specialist",
     goal="Извлечение полной и точной информации с корпоративного сайта компании",
     backstory="""Вы специалист по сбору информации с веб-сайтов компаний. 
@@ -108,13 +186,38 @@ web_scraper_agent = Agent(
     max_iter=5,
     max_execution_time=300,  # 5 минут
     memory=True,
-)
-
-# ============================================================================
-# АГЕНТ 2: Data Analyzer (Анализатор информации)
-# ============================================================================
-
-data_analyzer_agent = Agent(
+    )
+        # #region agent log
+        try:
+            with open(debug_log_path, 'a', encoding='utf-8') as f:
+                f.write(json.dumps({"sessionId":"debug-session","runId":"init","hypothesisId":"B","location":"Agents_crew.py:136","message":"Web Scraper Agent создан","data":{"success":True,"agent_type":str(type(web_scraper_agent)),"timestamp":__import__('datetime').datetime.now().isoformat()}})+'\n')
+        except: pass
+        # #endregion
+        print("✓ Web Scraper Agent создан успешно")
+    except Exception as e:
+        # #region agent log
+        try:
+            with open(debug_log_path, 'a', encoding='utf-8') as f:
+                f.write(json.dumps({"sessionId":"debug-session","runId":"init","hypothesisId":"B","location":"Agents_crew.py:140","message":"Ошибка создания Web Scraper Agent","data":{"error":str(e),"error_type":type(e).__name__,"timestamp":__import__('datetime').datetime.now().isoformat()}})+'\n')
+        except: pass
+        # #endregion
+        print(f"ОШИБКА при создании Web Scraper Agent: {e}")
+        import traceback
+        traceback.print_exc()
+        web_scraper_agent = None
+    
+    # ============================================================================
+    # АГЕНТ 2: Data Analyzer (Анализатор информации)
+    # ============================================================================
+    
+    try:
+        # #region agent log
+        try:
+            with open(debug_log_path, 'a', encoding='utf-8') as f:
+                f.write(json.dumps({"sessionId":"debug-session","runId":"init","hypothesisId":"B","location":"Agents_crew.py:145","message":"Создание Data Analyzer Agent","data":{"web_scraper_created":web_scraper_agent is not None,"timestamp":__import__('datetime').datetime.now().isoformat()}})+'\n')
+        except: pass
+        # #endregion
+        data_analyzer_agent = Agent(
     role="Corporate Data Analyst",
     goal="Анализ и структурирование информации о компании для выявления ключевых паттернов и взаимосвязей",
     backstory="""Вы опытный аналитик с 10+ летним опытом в анализе корпоративной информации.
@@ -137,13 +240,38 @@ data_analyzer_agent = Agent(
     max_iter=5,
     max_execution_time=300,
     memory=True,
-)
-
-# ============================================================================
-# АГЕНТ 3: Business Intelligence Engineer (Инженер BI)
-# ============================================================================
-
-bi_engineer_agent = Agent(
+    )
+        # #region agent log
+        try:
+            with open(debug_log_path, 'a', encoding='utf-8') as f:
+                f.write(json.dumps({"sessionId":"debug-session","runId":"init","hypothesisId":"B","location":"Agents_crew.py:164","message":"Data Analyzer Agent создан","data":{"success":True,"timestamp":__import__('datetime').datetime.now().isoformat()}})+'\n')
+        except: pass
+        # #endregion
+        print("✓ Data Analyzer Agent создан успешно")
+    except Exception as e:
+        # #region agent log
+        try:
+            with open(debug_log_path, 'a', encoding='utf-8') as f:
+                f.write(json.dumps({"sessionId":"debug-session","runId":"init","hypothesisId":"B","location":"Agents_crew.py:168","message":"Ошибка создания Data Analyzer Agent","data":{"error":str(e),"error_type":type(e).__name__,"timestamp":__import__('datetime').datetime.now().isoformat()}})+'\n')
+        except: pass
+        # #endregion
+        print(f"ОШИБКА при создании Data Analyzer Agent: {e}")
+        import traceback
+        traceback.print_exc()
+        data_analyzer_agent = None
+    
+    # ============================================================================
+    # АГЕНТ 3: Business Intelligence Engineer (Инженер BI)
+    # ============================================================================
+    
+    try:
+        # #region agent log
+        try:
+            with open(debug_log_path, 'a', encoding='utf-8') as f:
+                f.write(json.dumps({"sessionId":"debug-session","runId":"init","hypothesisId":"B","location":"Agents_crew.py:173","message":"Создание BI Engineer Agent","data":{"agents_created":web_scraper_agent is not None and data_analyzer_agent is not None,"timestamp":__import__('datetime').datetime.now().isoformat()}})+'\n')
+        except: pass
+        # #endregion
+        bi_engineer_agent = Agent(
     role="Business Intelligence Engineer",
     goal="Формирование сводной информации о компании в структурированном формате с аналитическими выводами",
     backstory="""Вы ведущий инженер бизнес-интеллиджеза с опытом в создании 
@@ -166,14 +294,50 @@ bi_engineer_agent = Agent(
     max_iter=10,
     max_execution_time=600,  # 10 минут на формирование финального отчета
     memory=True,
-)
-
-# ============================================================================
-# ОПРЕДЕЛЕНИЕ ЗАДАЧ (TASKS)
-# ============================================================================
-
-# ЗАДАЧА 1: Сбор информации с сайта
-task_1_scrape = Task(
+    )
+        # #region agent log
+        try:
+            with open(debug_log_path, 'a', encoding='utf-8') as f:
+                f.write(json.dumps({"sessionId":"debug-session","runId":"init","hypothesisId":"B","location":"Agents_crew.py:189","message":"BI Engineer Agent создан","data":{"success":True,"all_agents_created":all([web_scraper_agent, data_analyzer_agent, bi_engineer_agent]),"timestamp":__import__('datetime').datetime.now().isoformat()}})+'\n')
+        except: pass
+        # #endregion
+        print("✓ BI Engineer Agent создан успешно")
+    except Exception as e:
+        # #region agent log
+        try:
+            with open(debug_log_path, 'a', encoding='utf-8') as f:
+                f.write(json.dumps({"sessionId":"debug-session","runId":"init","hypothesisId":"B","location":"Agents_crew.py:193","message":"Ошибка создания BI Engineer Agent","data":{"error":str(e),"error_type":type(e).__name__,"timestamp":__import__('datetime').datetime.now().isoformat()}})+'\n')
+        except: pass
+        # #endregion
+        print(f"ОШИБКА при создании BI Engineer Agent: {e}")
+        import traceback
+        traceback.print_exc()
+        bi_engineer_agent = None
+    
+    # Проверяем, что все агенты созданы
+    # #region agent log
+    try:
+        with open(debug_log_path, 'a', encoding='utf-8') as f:
+            f.write(json.dumps({"sessionId":"debug-session","runId":"init","hypothesisId":"B","location":"Agents_crew.py:200","message":"Проверка создания агентов","data":{"web_scraper":web_scraper_agent is not None,"data_analyzer":data_analyzer_agent is not None,"bi_engineer":bi_engineer_agent is not None,"all_created":all([web_scraper_agent, data_analyzer_agent, bi_engineer_agent]),"timestamp":__import__('datetime').datetime.now().isoformat()}})+'\n')
+    except: pass
+    # #endregion
+    if not all([web_scraper_agent, data_analyzer_agent, bi_engineer_agent]):
+        print("ОШИБКА: Не все агенты созданы. Проверьте логи выше.")
+        crew = None
+    else:
+        # ============================================================================
+        # ОПРЕДЕЛЕНИЕ ЗАДАЧ (TASKS)
+        # ============================================================================
+        
+        try:
+            # #region agent log
+            try:
+                with open(debug_log_path, 'a', encoding='utf-8') as f:
+                    f.write(json.dumps({"sessionId":"debug-session","runId":"init","hypothesisId":"C","location":"Agents_crew.py:225","message":"Создание Task 1 (scrape)","data":{"Task_class":str(Task) if Task else None,"timestamp":__import__('datetime').datetime.now().isoformat()}})+'\n')
+            except: pass
+            # #endregion
+            # ЗАДАЧА 1: Сбор информации с сайта
+            task_1_scrape = Task(
     description="""Посетите корпоративный сайт {company_url} и извлеките следующую информацию:
     
     1. ОСНОВНАЯ ИНФОРМАЦИЯ:
@@ -213,11 +377,24 @@ task_1_scrape = Task(
     включая исходный текст, ссылки на источники и примечания о качестве данных.""",
     
     agent=web_scraper_agent,
-    output_file="task_1_scraped_data.md",
-)
-
-# ЗАДАЧА 2: Анализ информации
-task_2_analyze = Task(
+    output_file="tasks/task_1_scraped_data.md",
+            )
+            # #region agent log
+            try:
+                with open(debug_log_path, 'a', encoding='utf-8') as f:
+                    f.write(json.dumps({"sessionId":"debug-session","runId":"init","hypothesisId":"C","location":"Agents_crew.py:236","message":"Task 1 создана","data":{"success":True,"task_type":str(type(task_1_scrape)),"timestamp":__import__('datetime').datetime.now().isoformat()}})+'\n')
+            except: pass
+            # #endregion
+            print("✓ Task 1 (scrape) создана успешно")
+            
+            # ЗАДАЧА 2: Анализ информации
+            # #region agent log
+            try:
+                with open(debug_log_path, 'a', encoding='utf-8') as f:
+                    f.write(json.dumps({"sessionId":"debug-session","runId":"init","hypothesisId":"C","location":"Agents_crew.py:242","message":"Создание Task 2 (analyze)","data":{"task1_created":task_1_scrape is not None,"timestamp":__import__('datetime').datetime.now().isoformat()}})+'\n')
+            except: pass
+            # #endregion
+            task_2_analyze = Task(
     description="""На основе информации из Задачи 1, проведите детальный анализ:
     
     1. АНАЛИЗ БИЗНЕС-МОДЕЛИ:
@@ -250,11 +427,24 @@ task_2_analyze = Task(
     бизнеса, идентификацией тенденций и выявлением стратегических вопросов.""",
     
     agent=data_analyzer_agent,
-    output_file="task_2_analysis.md",
-)
-
-# ЗАДАЧА 3: Формирование итоговой сводки
-task_3_report = Task(
+    output_file="tasks/task_2_analysis.md",
+            )
+            # #region agent log
+            try:
+                with open(debug_log_path, 'a', encoding='utf-8') as f:
+                    f.write(json.dumps({"sessionId":"debug-session","runId":"init","hypothesisId":"C","location":"Agents_crew.py:272","message":"Task 2 создана","data":{"success":True,"timestamp":__import__('datetime').datetime.now().isoformat()}})+'\n')
+            except: pass
+            # #endregion
+            print("✓ Task 2 (analyze) создана успешно")
+            
+            # ЗАДАЧА 3: Формирование итоговой сводки
+            # #region agent log
+            try:
+                with open(debug_log_path, 'a', encoding='utf-8') as f:
+                    f.write(json.dumps({"sessionId":"debug-session","runId":"init","hypothesisId":"C","location":"Agents_crew.py:278","message":"Создание Task 3 (report)","data":{"tasks_created":task_1_scrape is not None and task_2_analyze is not None,"timestamp":__import__('datetime').datetime.now().isoformat()}})+'\n')
+            except: pass
+            # #endregion
+            task_3_report = Task(
     description="""На основе информации из Задач 1 и 2, создайте комплексный отчет 
     о компании {company_name} в следующем формате:
     
@@ -318,27 +508,82 @@ task_3_report = Task(
     Весь отчет должен быть на русском языке. Отчет должен быть готов для представления инвесторам или руководству.""",
     
     agent=bi_engineer_agent,
-    output_file="task_3_final_report.md",
-)
+    output_file="tasks/task_3_final_report.md",
+            )
+            # #region agent log
+            try:
+                with open(debug_log_path, 'a', encoding='utf-8') as f:
+                    f.write(json.dumps({"sessionId":"debug-session","runId":"init","hypothesisId":"C","location":"Agents_crew.py:370","message":"Task 3 создана","data":{"success":True,"all_tasks_created":all([task_1_scrape, task_2_analyze, task_3_report]),"timestamp":__import__('datetime').datetime.now().isoformat()}})+'\n')
+            except: pass
+            # #endregion
+            print("✓ Task 3 (report) создана успешно")
+            
+            # Проверяем, что все задачи созданы
+            # #region agent log
+            try:
+                with open(debug_log_path, 'a', encoding='utf-8') as f:
+                    f.write(json.dumps({"sessionId":"debug-session","runId":"init","hypothesisId":"C","location":"Agents_crew.py:375","message":"Проверка создания задач","data":{"task1":task_1_scrape is not None,"task2":task_2_analyze is not None,"task3":task_3_report is not None,"all_created":all([task_1_scrape, task_2_analyze, task_3_report]),"timestamp":__import__('datetime').datetime.now().isoformat()}})+'\n')
+            except: pass
+            # #endregion
+            if not all([task_1_scrape, task_2_analyze, task_3_report]):
+                print("ОШИБКА: Не все задачи созданы. Проверьте логи выше.")
+                crew = None
+            else:
+                # #region agent log
+                try:
+                    with open(debug_log_path, 'a', encoding='utf-8') as f:
+                        f.write(json.dumps({"sessionId":"debug-session","runId":"init","hypothesisId":"D","location":"Agents_crew.py:384","message":"Создание объекта Crew","data":{"Crew_class":str(Crew) if Crew else None,"agents_count":sum([1 for a in [web_scraper_agent, data_analyzer_agent, bi_engineer_agent] if a is not None]),"tasks_count":sum([1 for t in [task_1_scrape, task_2_analyze, task_3_report] if t is not None]),"timestamp":__import__('datetime').datetime.now().isoformat()}})+'\n')
+                except: pass
+                # #endregion
+                
+                try:
+                    crew = Crew(
+                        agents=[web_scraper_agent, data_analyzer_agent, bi_engineer_agent],
+                        tasks=[task_1_scrape, task_2_analyze, task_3_report],
+                        verbose=True,
+                        process="sequential",  # Выполнение задач последовательно
+                        output_file="crew_output.md",
+                    )
+                    # #region agent log
+                    try:
+                        with open(debug_log_path, 'a', encoding='utf-8') as f:
+                            f.write(json.dumps({"sessionId":"debug-session","runId":"init","hypothesisId":"D","location":"Agents_crew.py:401","message":"Crew объект создан","data":{"success":True,"crew_type":str(type(crew)),"timestamp":__import__('datetime').datetime.now().isoformat()}})+'\n')
+                    except: pass
+                    # #endregion
+                    print("✓ Crew объект создан успешно")
+                except Exception as e:
+                    # #region agent log
+                    try:
+                        with open(debug_log_path, 'a', encoding='utf-8') as f:
+                            f.write(json.dumps({"sessionId":"debug-session","runId":"init","hypothesisId":"D","location":"Agents_crew.py:405","message":"Ошибка создания Crew объекта","data":{"error":str(e),"error_type":type(e).__name__,"timestamp":__import__('datetime').datetime.now().isoformat()}})+'\n')
+                    except: pass
+                    # #endregion
+                    print(f"ОШИБКА при создании Crew объекта: {e}")
+                    import traceback
+                    traceback.print_exc()
+                    crew = None
+        except Exception as e:
+            # #region agent log
+            try:
+                with open(debug_log_path, 'a', encoding='utf-8') as f:
+                    f.write(json.dumps({"sessionId":"debug-session","runId":"init","hypothesisId":"C","location":"Agents_crew.py:410","message":"Ошибка при создании задач","data":{"error":str(e),"error_type":type(e).__name__,"timestamp":__import__('datetime').datetime.now().isoformat()}})+'\n')
+            except: pass
+            # #endregion
+            print(f"ОШИБКА при создании задач: {e}")
+            import traceback
+            traceback.print_exc()
+            task_1_scrape = None
+            task_2_analyze = None
+            task_3_report = None
+            crew = None
 
+# Проверяем финальное состояние crew перед экспортом
 # #region agent log
-write_debug_log({
-    "sessionId": "debug-session",
-    "runId": "init",
-    "hypothesisId": "A",
-    "location": "Agents_crew.py:258",
-    "message": "Создание объекта Crew",
-    "data": {"timestamp": datetime.now().isoformat()}
-})
+try:
+    with open(debug_log_path, 'a', encoding='utf-8') as f:
+        f.write(json.dumps({"sessionId":"debug-session","runId":"init","hypothesisId":"E","location":"Agents_crew.py:559","message":"Финальная проверка crew перед экспортом","data":{"crew_is_none":crew is None,"crew_type":str(type(crew)) if crew else None,"CREWAI_IMPORTED":CREWAI_IMPORTED,"timestamp":__import__('datetime').datetime.now().isoformat()}})+'\n')
+except: pass
 # #endregion
-
-crew = Crew(
-    agents=[web_scraper_agent, data_analyzer_agent, bi_engineer_agent],
-    tasks=[task_1_scrape, task_2_analyze, task_3_report],
-    verbose=True,
-    process="sequential",  # Выполнение задач последовательно
-    output_file="crew_output.md",
-)
 
 # #region agent log
 write_debug_log({
@@ -347,7 +592,7 @@ write_debug_log({
     "hypothesisId": "A",
     "location": "Agents_crew.py:264",
     "message": "Объект Crew создан",
-    "data": {"timestamp": datetime.now().isoformat()}
+    "data": {"timestamp": datetime.now().isoformat(), "crew_is_none": crew is None}
 })
 # #endregion
 

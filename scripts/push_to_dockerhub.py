@@ -10,6 +10,10 @@ import re
 from pathlib import Path
 from datetime import datetime
 
+# Изменяем рабочую директорию на корень проекта (на уровень выше scripts/)
+PROJECT_ROOT = Path(__file__).parent.parent
+os.chdir(PROJECT_ROOT)
+
 def run_command(cmd, check=True):
     """Выполняет команду и выводит результат"""
     print(f"\n{'='*60}")
@@ -20,7 +24,8 @@ def run_command(cmd, check=True):
         cmd,
         shell=True,
         check=check,
-        capture_output=False
+        capture_output=False,
+        cwd=PROJECT_ROOT
     )
     
     if result.returncode != 0 and check:
@@ -57,7 +62,8 @@ def get_git_tag():
             ['git', 'describe', '--tags', '--abbrev=0'],
             capture_output=True,
             text=True,
-            check=False
+            check=False,
+            cwd=PROJECT_ROOT
         )
         if result.returncode == 0:
             tag = result.stdout.strip()
@@ -72,7 +78,7 @@ def get_git_tag():
 def get_version_from_file():
     """Пытается получить версию из файла VERSION или __version__"""
     # Проверяем файл VERSION
-    version_file = Path('VERSION')
+    version_file = PROJECT_ROOT / 'VERSION'
     if version_file.exists():
         try:
             version = version_file.read_text(encoding='utf-8').strip()
@@ -83,7 +89,7 @@ def get_version_from_file():
     
     # Проверяем __version__ в main.py
     try:
-        main_file = Path('main.py')
+        main_file = PROJECT_ROOT / 'main.py'
         if main_file.exists():
             content = main_file.read_text(encoding='utf-8')
             match = re.search(r'__version__\s*=\s*["\']([^"\']+)["\']', content)
@@ -233,7 +239,7 @@ def main():
     print(f"   docker run -p 5000:5000 --env-file .env {image_name}")
     
     print(f"\n📝 Команда для запуска с docker-compose:")
-    print(f"   (обновите docker-compose.yml, указав образ: {image_name})")
+    print(f"   (обновите scripts/docker-compose.yml, указав образ: {image_name})")
     
     print("\n" + "="*60)
 

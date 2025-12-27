@@ -19,6 +19,7 @@ const newAnalysisBtn = document.getElementById('newAnalysisBtn');
 let currentTaskId = null;
 let currentResult = null;
 let statusCheckInterval = null;
+let currentProgress = 0; // Текущее значение прогресса (только увеличивается)
 
 form.addEventListener('submit', async (e) => {
     e.preventDefault();
@@ -41,6 +42,7 @@ form.addEventListener('submit', async (e) => {
     
     // Показываем статус
     statusContainer.style.display = 'block';
+    currentProgress = 0; // Сбрасываем прогресс при новом анализе
     progressFill.style.width = '0%';
     progressText.textContent = '0%';
     statusMessage.textContent = 'Запуск анализа...';
@@ -158,9 +160,21 @@ function startStatusPolling() {
 }
 
 function updateProgress(progress, message) {
-    progressFill.style.width = `${progress}%`;
-    progressText.textContent = `${progress}%`;
-    statusMessage.textContent = message;
+    // Прогресс может только увеличиваться, никогда не уменьшаться
+    // Используем Math.max, чтобы гарантировать, что прогресс не откатывается назад
+    const newProgress = Math.max(currentProgress, Math.min(progress, 100));
+    
+    // Обновляем только если прогресс действительно увеличился
+    if (newProgress > currentProgress) {
+        currentProgress = newProgress;
+        progressFill.style.width = `${currentProgress}%`;
+        progressText.textContent = `${currentProgress}%`;
+    }
+    
+    // Сообщение обновляем всегда (может меняться независимо от прогресса)
+    if (message) {
+        statusMessage.textContent = message;
+    }
 }
 
 function showResult(result) {

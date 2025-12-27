@@ -9,11 +9,13 @@
 ### Вариант 1: Ручной запуск через docker-compose
 
 #### Режим разработки (с hot reload):
+
 ```bash
 docker-compose up -d
 ```
 
 #### Режим продакшена (образ из Docker Hub):
+
 ```bash
 docker-compose -f docker-compose.prod.yml up -d
 ```
@@ -32,6 +34,7 @@ docker run -d \
 ## Проверка статуса контейнеров
 
 ### В Docker Desktop:
+
 1. Откройте Docker Desktop
 2. Перейдите на вкладку "Containers"
 3. Вы должны увидеть запущенные контейнеры
@@ -46,7 +49,7 @@ docker ps
 docker ps -a
 
 # Проверить контейнеры через docker-compose
-docker-compose ps
+docker-compose -f scripts/docker-compose.yml ps
 ```
 
 ## Просмотр логов
@@ -66,10 +69,10 @@ docker logs -f comp-site-analyz
 
 ```bash
 # Остановить контейнеры разработки
-docker-compose down
+docker-compose -f scripts/docker-compose.yml down
 
 # Остановить контейнеры продакшена
-docker-compose -f docker-compose.prod.yml down
+docker-compose -f scripts/docker-compose.prod.yml down
 
 # Остановить конкретный контейнер
 docker stop comp-site-analyz
@@ -82,12 +85,14 @@ docker rm comp-site-analyz
 
 ### Контейнер не запускается
 
-1. **Проверьте логи**:
+1. **Проверьте логи:**
+
    ```bash
    docker-compose logs
    ```
 
-2. **Проверьте, что порт 5000 свободен**:
+2. **Проверьте, что порт 5000 свободен:**
+
    ```bash
    # Windows
    netstat -ano | findstr :5000
@@ -96,31 +101,71 @@ docker rm comp-site-analyz
    lsof -i :5000
    ```
 
-3. **Проверьте файл .env**:
+3. **Проверьте файл .env:**
+
    Убедитесь, что файл `.env` существует и содержит необходимые переменные.
 
 ### Контейнер запускается, но сразу останавливается
 
-1. **Проверьте логи**:
+1. **Проверьте логи:**
+
    ```bash
-   docker-compose logs --tail=50
+   docker-compose -f scripts/docker-compose.yml logs --tail=50
    ```
 
-2. **Проверьте переменные окружения**:
+2. **Проверьте переменные окружения:**
+
    ```bash
-   docker-compose exec web env
+   docker-compose -f scripts/docker-compose.yml exec web env
    ```
 
-3. **Запустите контейнер в интерактивном режиме**:
+3. **Запустите контейнер в интерактивном режиме:**
+
    ```bash
-   docker-compose run --rm web python main.py
+   docker-compose -f scripts/docker-compose.yml run --rm web python main.py
    ```
+
+### Ошибка NumPy (несовместимость архитектуры)
+
+Если в логах видна ошибка:
+
+```
+RuntimeError: NumPy was built with baseline optimizations: (X86_V2) but your machine doesn't support: (X86_V2)
+```
+
+**Причина**: NumPy 2.x использует оптимизации, которые могут быть несовместимы с некоторыми процессорами.
+
+**Решение**:
+
+1. Образ уже содержит исправленную версию NumPy (<2.0)
+2. Если проблема сохраняется, пересоберите образ:
+
+   ```bash
+   docker-compose -f scripts/docker-compose.yml build --no-cache
+   docker-compose -f scripts/docker-compose.yml up -d
+   ```
+
+### Ошибка прав доступа
+
+Если возникает ошибка:
+
+```
+PermissionError: [Errno 13] Permission denied: '/home/appuser'
+```
+
+**Решение**: Dockerfile настроен для автоматического создания домашней директории. Пересоберите образ:
+
+```bash
+docker-compose -f scripts/docker-compose.yml build --no-cache
+docker-compose -f scripts/docker-compose.yml up -d
+```
 
 ### Контейнер не виден в Docker Desktop
 
 1. **Обновите список контейнеров** в Docker Desktop (кнопка обновления)
 2. **Проверьте фильтры** - возможно, включен фильтр "Running only"
-3. **Проверьте через командную строку**:
+3. **Проверьте через командную строку:**
+
    ```bash
    docker ps -a
    ```
@@ -129,16 +174,16 @@ docker rm comp-site-analyz
 
 ```bash
 # Перезапустить контейнер
-docker-compose restart
+docker-compose -f scripts/docker-compose.yml restart
 
 # Пересобрать и запустить
-docker-compose up -d --build
+docker-compose -f scripts/docker-compose.yml up -d --build
 
 # Показать использование ресурсов
 docker stats
 
 # Войти в контейнер
-docker-compose exec web bash
+docker-compose -f scripts/docker-compose.yml exec web bash
 # или
 docker exec -it comp-site-analyz bash
 
@@ -149,9 +194,20 @@ docker inspect comp-site-analyz
 ## Проверка работы приложения
 
 После запуска контейнера откройте в браузере:
+
 ```
 http://localhost:5000
 ```
 
 Если приложение работает, вы увидите главную страницу.
+
+## Технические детали образа
+
+Образ настроен для стабильной работы:
+
+- **NumPy**: версия <2.0 (совместимость с различными архитектурами)
+- **Пользователь**: non-root (`appuser`) для безопасности
+- **Хост**: `0.0.0.0` по умолчанию (доступ извне контейнера)
+- **Порт**: 5000 (пробрасывается наружу)
+- **Автоперезапуск**: `unless-stopped` (автоматический перезапуск при сбоях)
 

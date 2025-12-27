@@ -14,7 +14,8 @@ echo.
 echo Запуск Python скрипта для отправки кода...
 echo.
 
-REM Запуск Python скрипта
+REM Запуск Python скрипта из папки scripts
+cd /d "%~dp0"
 py -3.11 push_to_github.py
 
 if errorlevel 1 (

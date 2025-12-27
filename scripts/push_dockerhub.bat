@@ -13,7 +13,8 @@ if errorlevel 1 (
     exit /b 1
 )
 
-REM Запуск Python скрипта
+REM Запуск Python скрипта из папки scripts
+cd /d "%~dp0"
 python push_to_dockerhub.py
 
 pause

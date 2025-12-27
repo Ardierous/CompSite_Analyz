@@ -5,7 +5,9 @@ services:
     # Для разработки: используем локальную сборку
     # Для продакшена: раскомментируйте строку ниже и закомментируйте build
     # image: avardous/comp_site_analyz:latest
-    build: .
+    build:
+      context: ..
+      dockerfile: ../Dockerfile
     ports:
       - "5000:5000"
     environment:
@@ -15,10 +17,10 @@ services:
       - FLASK_PORT=5000
       - PYTHONUNBUFFERED=1
     env_file:
-      - .env
+      - ../.env
     volumes:
       # Монтируем код для hot reload (изменения применяются без пересборки)
-      - .:/app
+      - ..:/app
       # Исключаем директории, которые не нужны в контейнере
       - /app/__pycache__
       - /app/.pytest_cache

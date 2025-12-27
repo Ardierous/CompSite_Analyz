@@ -9,7 +9,224 @@ import io
 import requests
 import json
 from pathlib import Path
+import sys
+import platform
+import subprocess
+import socket
+import atexit
+import signal
 warnings.filterwarnings('ignore')
+
+# Путь к PID файлу
+PID_FILE = Path(__file__).parent / '.app.pid'
+
+# ANSI коды для цветного вывода в терминале
+class Colors:
+    """ANSI escape коды для цветного вывода"""
+    GREEN = '\033[92m'  # Зеленый
+    RED = '\033[91m'    # Красный
+    YELLOW = '\033[93m' # Желтый
+    BLUE = '\033[94m'   # Синий
+    RESET = '\033[0m'   # Сброс цвета
+    BOLD = '\033[1m'    # Жирный
+
+def print_green(text):
+    """Выводит текст зеленым цветом"""
+    print(f"{Colors.GREEN}{text}{Colors.RESET}")
+
+def print_red(text):
+    """Выводит текст красным цветом"""
+    print(f"{Colors.RED}{text}{Colors.RESET}")
+
+def print_yellow(text):
+    """Выводит текст желтым цветом"""
+    print(f"{Colors.YELLOW}{text}{Colors.RESET}")
+
+def print_blue(text):
+    """Выводит текст синим цветом"""
+    print(f"{Colors.BLUE}{text}{Colors.RESET}")
+
+def check_port_in_use(host, port):
+    """Проверяет, занят ли порт"""
+    sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    sock.settimeout(1)
+    result = sock.connect_ex((host, port))
+    sock.close()
+    return result == 0
+
+def is_process_running(pid):
+    """Проверяет, запущен ли процесс с указанным PID"""
+    try:
+        if platform.system() == 'Windows':
+            result = subprocess.run(
+                ['tasklist', '/FI', f'PID eq {pid}'],
+                capture_output=True,
+                text=True,
+                creationflags=subprocess.CREATE_NO_WINDOW if hasattr(subprocess, 'CREATE_NO_WINDOW') else 0
+            )
+            return str(pid) in result.stdout
+        else:
+            # Linux/Mac: используем kill -0 для проверки существования процесса
+            result = subprocess.run(['kill', '-0', str(pid)], capture_output=True)
+            return result.returncode == 0
+    except:
+        return False
+
+def kill_process(pid):
+    """Завершает процесс с указанным PID"""
+    try:
+        if platform.system() == 'Windows':
+            subprocess.run(
+                ['taskkill', '/F', '/PID', str(pid)],
+                capture_output=True,
+                creationflags=subprocess.CREATE_NO_WINDOW if hasattr(subprocess, 'CREATE_NO_WINDOW') else 0
+            )
+        else:
+            subprocess.run(['kill', '-9', str(pid)], capture_output=True)
+        return True
+    except Exception as e:
+        logger.warning(f"Не удалось завершить процесс {pid}: {e}")
+        return False
+
+def kill_process_on_port(port):
+    """Завершает все процессы, использующие указанный порт"""
+    killed_count = 0
+    try:
+        if platform.system() == 'Windows':
+            # Windows: используем netstat и taskkill
+            # Сначала получаем все PID процессов на порту
+            result = subprocess.run(
+                ['netstat', '-ano'],
+                capture_output=True,
+                text=True,
+                creationflags=subprocess.CREATE_NO_WINDOW if hasattr(subprocess, 'CREATE_NO_WINDOW') else 0
+            )
+            pids_to_kill = set()
+            for line in result.stdout.split('\n'):
+                if f':{port}' in line and 'LISTENING' in line:
+                    parts = line.split()
+                    if len(parts) > 4:
+                        pid = parts[-1]
+                        if pid.isdigit():
+                            pids_to_kill.add(pid)
+            
+            # Завершаем все найденные процессы
+            for pid in pids_to_kill:
+                if kill_process(pid):
+                    logger.info(f"Завершен процесс с PID {pid}, занимавший порт {port}")
+                    print_red(f"✓ Завершен процесс с PID {pid}, занимавший порт {port}")
+                    killed_count += 1
+        else:
+            # Linux/Mac: используем lsof и kill
+            result = subprocess.run(
+                ['lsof', '-ti', f':{port}'],
+                capture_output=True,
+                text=True
+            )
+            if result.returncode == 0:
+                pids = result.stdout.strip().split('\n')
+                for pid in pids:
+                    if pid and pid.isdigit():
+                        if kill_process(pid):
+                            logger.info(f"Завершен процесс с PID {pid}, занимавший порт {port}")
+                            print_red(f"✓ Завершен процесс с PID {pid}, занимавший порт {port}")
+                            killed_count += 1
+    except Exception as e:
+        logger.error(f"Ошибка при попытке завершить процесс на порту {port}: {e}")
+        print(f"⚠ Предупреждение: не удалось автоматически завершить процесс на порту {port}")
+    
+    return killed_count > 0
+
+def check_and_kill_existing_instance():
+    """Проверяет наличие запущенного экземпляра приложения и завершает его"""
+    if not PID_FILE.exists():
+        return True  # PID файл не существует, приложение не запущено
+    
+    try:
+        # Читаем PID из файла
+        with open(PID_FILE, 'r') as f:
+            old_pid_str = f.read().strip()
+            if not old_pid_str:
+                # Пустой файл, удаляем его
+                PID_FILE.unlink()
+                return True
+            old_pid = int(old_pid_str)
+        
+        # Проверяем, запущен ли процесс
+        if is_process_running(old_pid):
+            logger.warning(f"Обнаружен запущенный экземпляр приложения (PID: {old_pid}). Принудительно завершаю...")
+            print_yellow(f"⚠ Обнаружен запущенный экземпляр приложения (PID: {old_pid}). Принудительно завершаю...")
+            
+            # Принудительно завершаем процесс
+            if kill_process(old_pid):
+                logger.info(f"Предыдущий экземпляр приложения (PID: {old_pid}) успешно завершен")
+                print_red(f"✓ Предыдущий экземпляр приложения (PID: {old_pid}) успешно завершен")
+                # Ждем немного, чтобы процесс завершился
+                import time
+                time.sleep(2)  # Увеличено время ожидания
+                
+                # Проверяем еще раз, что процесс действительно завершен
+                if is_process_running(old_pid):
+                    logger.warning(f"Процесс {old_pid} все еще запущен после попытки завершения. Повторная попытка...")
+                    print_yellow(f"⚠ Процесс {old_pid} все еще запущен. Повторная попытка завершения...")
+                    kill_process(old_pid)
+                    time.sleep(1)
+            else:
+                logger.error(f"Не удалось завершить предыдущий экземпляр (PID: {old_pid})")
+                print_red(f"❌ Не удалось завершить предыдущий экземпляр (PID: {old_pid})")
+                return False
+        else:
+            # Процесс не запущен, но PID файл остался (возможно, аварийное завершение)
+            logger.info(f"PID файл найден, но процесс {old_pid} не запущен. Удаляю старый PID файл.")
+            print(f"ℹ Обнаружен старый PID файл (процесс не запущен). Очищаю...")
+        
+        # Удаляем старый PID файл
+        try:
+            PID_FILE.unlink()
+        except:
+            pass
+        
+        return True
+    except ValueError:
+        # Неверный формат PID файла
+        logger.warning("PID файл содержит неверные данные. Удаляю...")
+        try:
+            PID_FILE.unlink()
+        except:
+            pass
+        return True
+    except Exception as e:
+        logger.error(f"Ошибка при проверке существующего экземпляра: {e}")
+        # Пытаемся удалить поврежденный PID файл
+        try:
+            PID_FILE.unlink()
+        except:
+            pass
+        return True  # Продолжаем запуск, даже если не удалось проверить
+
+def create_pid_file():
+    """Создает PID файл с текущим PID процесса"""
+    try:
+        current_pid = os.getpid()
+        with open(PID_FILE, 'w') as f:
+            f.write(str(current_pid))
+        logger.info(f"Создан PID файл: {PID_FILE} (PID: {current_pid})")
+    except Exception as e:
+        logger.error(f"Не удалось создать PID файл: {e}")
+
+def remove_pid_file():
+    """Удаляет PID файл при завершении приложения"""
+    try:
+        if PID_FILE.exists():
+            PID_FILE.unlink()
+            logger.info("PID файл удален")
+    except Exception as e:
+        logger.error(f"Не удалось удалить PID файл: {e}")
+
+# ВАЖНО: Отключаем телеметрию CrewAI ДО загрузки переменных окружения
+# Это должно быть сделано как можно раньше, до импорта Agents_crew
+os.environ["CREWAI_TELEMETRY_OPT_OUT"] = "1"
+os.environ["CREWAI_TRACING_ENABLED"] = "false"
 
 # Загрузка переменных окружения из .env файла
 try:
@@ -19,7 +236,30 @@ except ImportError:
     # Если python-dotenv не установлен, используем только переменные окружения системы
     pass
 
+# Убеждаемся, что телеметрия отключена (на случай, если .env переопределил значения)
+os.environ["CREWAI_TELEMETRY_OPT_OUT"] = "1"
+os.environ["CREWAI_TRACING_ENABLED"] = "false"
+
 # Вспомогательная функция для записи в debug.log (опционально)
+def update_progress_safely(task_id, new_progress, message=None):
+    """
+    Безопасно обновляет прогресс задачи, гарантируя, что он только увеличивается
+    
+    Args:
+        task_id: ID задачи
+        new_progress: Новое значение прогресса (0-100)
+        message: Опциональное сообщение для обновления
+    """
+    if task_id not in analysis_status:
+        return
+    
+    current_prog = analysis_status[task_id].get('progress', 0)
+    final_progress = max(current_prog, min(new_progress, 100))
+    analysis_status[task_id]['progress'] = final_progress
+    
+    if message:
+        analysis_status[task_id]['message'] = message
+
 def write_debug_log(data):
     """Безопасно записывает данные в debug.log, если файл доступен"""
     try:
@@ -60,13 +300,64 @@ except ImportError as e:
     logger.warning(f"Модуль отслеживания расходов не доступен: {e}")
     COST_TRACKING_AVAILABLE = False
 
+# #region agent log
 try:
-    from Agents_crew import crew
-    CREW_AVAILABLE = True
-except ImportError as e:
-    logger.warning(f"Could not import crew: {e}")
-    CREW_AVAILABLE = False
-    crew = None
+    import json
+    from pathlib import Path
+    debug_log_path = Path(__file__).parent / '.cursor' / 'debug.log'
+    with open(debug_log_path, 'a', encoding='utf-8') as f:
+        f.write(json.dumps({"sessionId":"debug-session","runId":"init","hypothesisId":"E","location":"main.py:64","message":"Попытка импорта Agents_crew","data":{"timestamp":__import__('datetime').datetime.now().isoformat()}})+'\n')
+except: pass
+# #endregion
+# Проверяем, что это дочерний процесс Flask reloader (рабочий сервер)
+# WERKZEUG_RUN_MAIN устанавливается Flask только в дочернем процессе
+# В основном процессе не импортируем crew, чтобы избежать ошибок
+is_werkzeug_main = os.environ.get('WERKZEUG_RUN_MAIN') == 'true'
+FLASK_DEBUG = os.getenv('FLASK_DEBUG', 'True').lower() == 'true'
+
+# Импортируем crew только в дочернем процессе или если debug отключен
+if is_werkzeug_main or not FLASK_DEBUG:
+    try:
+        from Agents_crew import crew
+        # #region agent log
+        try:
+            with open(debug_log_path, 'a', encoding='utf-8') as f:
+                f.write(json.dumps({"sessionId":"debug-session","runId":"init","hypothesisId":"E","location":"main.py:72","message":"Agents_crew импортирован","data":{"crew_is_none":crew is None,"crew_type":str(type(crew)) if crew else None,"timestamp":__import__('datetime').datetime.now().isoformat()}})+'\n')
+        except: pass
+        # #endregion
+        if crew is None:
+            error_msg = "CrewAI не доступен. Проверьте установку зависимостей."
+            logger.error(error_msg)
+            print(f"ОШИБКА: {error_msg}")
+            print("Проверьте логи выше для детальной информации об ошибке.")
+            CREW_AVAILABLE = False
+        else:
+            CREW_AVAILABLE = True
+            logger.info("CrewAI успешно импортирован и инициализирован")
+            print("✓ CrewAI успешно инициализирован")
+    except ImportError as e:
+        error_msg = f"Could not import crew: {e}"
+        logger.error(error_msg, exc_info=True)
+        print(f"ОШИБКА: {error_msg}")
+        print("Возможные причины:")
+        print("  1. CrewAI не установлен: pip install crewai>=0.11.2")
+        print("  2. Отсутствуют зависимости CrewAI")
+        print("  3. Проблема с импортом модуля Agents_crew.py")
+        CREW_AVAILABLE = False
+        crew = None
+    except Exception as e:
+        error_msg = f"Ошибка при инициализации CrewAI: {e}"
+        logger.error(error_msg, exc_info=True)
+        print(f"ОШИБКА: {error_msg}")
+        import traceback
+        print("Детальная информация об ошибке:")
+        traceback.print_exc()
+        CREW_AVAILABLE = False
+        crew = None
+else:
+    # В основном процессе Flask reloader не импортируем crew
+    CREW_AVAILABLE = True  # Устанавливаем True, чтобы приложение запустилось
+    crew = None  # crew будет импортирован в дочернем процессе
 
 app = Flask(__name__)
 CORS(app)
@@ -186,13 +477,22 @@ def run_analysis(task_id, company_url, initial_balance=None):
             logger.warning(f"[{task_id}] Задача создана в run_analysis (не должна была отсутствовать)")
         
         if not CREW_AVAILABLE:
-            raise Exception("CrewAI не доступен. Проверьте установку зависимостей.")
+            error_msg = "CrewAI не доступен. Проверьте установку зависимостей."
+            logger.error(f"[{task_id}] {error_msg}")
+            # Попробуем импортировать еще раз для диагностики
+            try:
+                import crewai
+                logger.info(f"CrewAI модуль найден, версия: {crewai.__version__ if hasattr(crewai, '__version__') else 'неизвестна'}")
+            except ImportError as e:
+                logger.error(f"CrewAI модуль не установлен: {e}")
+            except Exception as e:
+                logger.error(f"Ошибка при проверке CrewAI: {e}")
+            raise Exception(error_msg)
         
         # Проверяем доступность сайта с правильными заголовками
         try:
             if task_id in analysis_status:
-                analysis_status[task_id]['progress'] = 5
-                analysis_status[task_id]['message'] = 'Проверка доступности сайта...'
+                update_progress_safely(task_id, 5, 'Проверка доступности сайта...')
             else:
                 logger.error(f"[{task_id}] Задача исчезла из analysis_status перед проверкой сайта")
             
@@ -249,8 +549,7 @@ def run_analysis(task_id, company_url, initial_balance=None):
         logger.info(f"[{task_id}] Название компании: {company_name}")
         
         # Обновляем статус
-        analysis_status[task_id]['progress'] = 10
-        analysis_status[task_id]['message'] = 'Подготовка к анализу...'
+        update_progress_safely(task_id, 10, 'Подготовка к анализу...')
         logger.info(f"[{task_id}] Этап 1: Подготовка к анализу")
         
         # Подготавливаем входные данные
@@ -284,6 +583,8 @@ def run_analysis(task_id, company_url, initial_balance=None):
             ]
             message_index = 0
             
+            last_progress = start_progress  # Отслеживаем последнее значение прогресса
+            
             while progress_thread_running.is_set():
                 if task_id not in analysis_status or analysis_status[task_id]['status'] != 'processing':
                     break
@@ -297,13 +598,18 @@ def run_analysis(task_id, company_url, initial_balance=None):
                     # Используем слегка ускоренную функцию для более естественного движения
                     # Комбинация линейной и квадратичной для плавности без замедления в начале
                     smooth_ratio = progress_ratio * (0.3 + 0.7 * progress_ratio)  # 30% линейная + 70% квадратичная
-                    current_progress = int(start_progress + (target_progress - start_progress) * smooth_ratio)
+                    calculated_progress = int(start_progress + (target_progress - start_progress) * smooth_ratio)
                 else:
                     # Если прошло больше времени, медленно приближаемся к target_progress
                     extra_time = elapsed_time - estimated_duration
                     # Медленное увеличение после истечения ожидаемого времени
                     additional_progress = min(int(extra_time / 10), target_progress - start_progress)
-                    current_progress = min(start_progress + additional_progress, target_progress)
+                    calculated_progress = min(start_progress + additional_progress, target_progress)
+                
+                # ВАЖНО: Прогресс может только увеличиваться, никогда не уменьшаться
+                # Используем max, чтобы гарантировать монотонное увеличение
+                current_progress = max(last_progress, calculated_progress)
+                last_progress = current_progress  # Сохраняем для следующей итерации
                 
                 # Обновляем сообщение каждые ~12 секунд (10 сообщений за ~120 секунд)
                 if elapsed_time > 0:
@@ -312,8 +618,7 @@ def run_analysis(task_id, company_url, initial_balance=None):
                         message_index = new_message_index
                 
                 if task_id in analysis_status and analysis_status[task_id]['status'] == 'processing':
-                    analysis_status[task_id]['progress'] = current_progress
-                    analysis_status[task_id]['message'] = messages[message_index]
+                    update_progress_safely(task_id, current_progress, messages[message_index])
                 
                 time.sleep(1)  # Обновляем каждую секунду для плавности
         
@@ -322,8 +627,7 @@ def run_analysis(task_id, company_url, initial_balance=None):
         progress_thread.start()
         
         # Запускаем анализ
-        analysis_status[task_id]['progress'] = 15
-        analysis_status[task_id]['message'] = 'Запуск анализа...'
+        update_progress_safely(task_id, 15, 'Запуск анализа...')
         logger.info(f"[{task_id}] Этап 2: Запуск CrewAI анализа")
         
         # #region agent log
@@ -362,16 +666,14 @@ def run_analysis(task_id, company_url, initial_balance=None):
         logger.info(f"[{task_id}] CrewAI анализ завершен")
         
         # Плавное завершение с небольшими шагами
-        analysis_status[task_id]['progress'] = 90
-        analysis_status[task_id]['message'] = 'Завершение анализа...'
+        update_progress_safely(task_id, 90, 'Завершение анализа...')
         logger.info(f"[{task_id}] Этап 3: Завершение анализа")
         
         import time
         time.sleep(0.5)  # Небольшая пауза для плавности
         
         # Вычисляем стоимость анализа
-        analysis_status[task_id]['progress'] = 93
-        analysis_status[task_id]['message'] = 'Расчет стоимости...'
+        update_progress_safely(task_id, 93, 'Расчет стоимости...')
         cost = None
         if COST_TRACKING_AVAILABLE and initial_balance is not None:
             cost = calculate_analysis_cost(task_id, initial_balance)
@@ -381,8 +683,7 @@ def run_analysis(task_id, company_url, initial_balance=None):
         time.sleep(0.3)  # Небольшая пауза для плавности
         
         # Сохраняем результат
-        analysis_status[task_id]['progress'] = 96
-        analysis_status[task_id]['message'] = 'Сохранение результатов...'
+        update_progress_safely(task_id, 96, 'Сохранение результатов...')
         analysis_results[task_id] = {
             'result': str(result),
             'url': company_url,
@@ -539,17 +840,102 @@ def export_to_docx(task_id):
         return jsonify({'error': f'Ошибка при создании документа: {str(e)}'}), 500
 
 if __name__ == '__main__':
+    # Проверяем, что это дочерний процесс Flask reloader (рабочий сервер)
+    # WERKZEUG_RUN_MAIN устанавливается Flask только в дочернем процессе
+    # Используем уже определенную переменную is_werkzeug_main из начала файла
+    
+    # Проверки PID файла и порта выполняем только в основном процессе
+    # (до запуска reloader) или если debug отключен
+    if not is_werkzeug_main or not FLASK_DEBUG:
+        # Регистрируем обработчик для удаления PID файла при завершении
+        atexit.register(remove_pid_file)
+        
+        # Обработка сигналов для корректного завершения
+        def signal_handler(signum, frame):
+            print_red("\n" + "=" * 60)
+            print_red("Завершение работы приложения...")
+            print_red("=" * 60)
+            remove_pid_file()
+            sys.exit(0)
+        
+        signal.signal(signal.SIGINT, signal_handler)
+        signal.signal(signal.SIGTERM, signal_handler)
+        
+        # ШАГ 1: Проверяем наличие запущенного экземпляра приложения через PID файл
+        # Это основная проверка - если приложение запущено, оно создало PID файл
+        logger.info("Проверка запущенных экземпляров приложения...")
+        print("Проверка запущенных экземпляров приложения...")
+        if not check_and_kill_existing_instance():
+            logger.error("Не удалось завершить предыдущий экземпляр приложения")
+            print_red("❌ Ошибка: не удалось завершить предыдущий экземпляр приложения")
+            sys.exit(1)
+        
+        # ========================================================================
+        # ШАГ 2: Дополнительная проверка - занят ли порт
+        # ========================================================================
+        # Проверяем порт на случай, если PID файл был удален, но процесс еще работает
+        # или если другой процесс использует порт 5000
+        check_host = FLASK_HOST if FLASK_HOST != '0.0.0.0' else '127.0.0.1'
+        import time
+        
+        # Проверяем порт несколько раз с попытками завершения
+        # Увеличено количество попыток для более надежного освобождения порта
+        max_attempts = 10
+        for attempt in range(max_attempts):
+            if check_port_in_use(check_host, FLASK_PORT):
+                if attempt == 0:
+                    logger.warning(f"Порт {FLASK_PORT} уже занят. Принудительно завершаю предыдущий процесс...")
+                    print_yellow(f"⚠ Порт {FLASK_PORT} уже занят. Принудительно завершаю предыдущий процесс...")
+                else:
+                    logger.warning(f"Порт {FLASK_PORT} все еще занят (попытка {attempt + 1}/{max_attempts}). Повторная попытка завершения...")
+                    print_yellow(f"⚠ Порт {FLASK_PORT} все еще занят. Повторная попытка завершения (попытка {attempt + 1}/{max_attempts})...")
+                
+                kill_process_on_port(FLASK_PORT)
+                
+                # Ждем, чтобы порт освободился (увеличено время ожидания для надежности)
+                time.sleep(3)  # Увеличено с 2 до 3 секунд
+                
+                # Проверяем снова
+                if not check_port_in_use(check_host, FLASK_PORT):
+                    logger.info(f"Порт {FLASK_PORT} успешно освобожден после {attempt + 1} попыток")
+                    print_green(f"✓ Порт {FLASK_PORT} успешно освобожден после {attempt + 1} попыток")
+                    break
+            else:
+                # Порт свободен, можно запускать
+                break
+        else:
+            # Все попытки исчерпаны, порт все еще занят
+            logger.error(f"Порт {FLASK_PORT} все еще занят после {max_attempts} попыток завершения процесса")
+            print_red(f"❌ Ошибка: порт {FLASK_PORT} все еще занят после {max_attempts} попыток.")
+            print_red(f"   Закройте приложение вручную или измените порт в переменных окружения.")
+            print_red(f"   Используйте скрипт scripts/stop_app.py для принудительного завершения.")
+            sys.exit(1)
+        
+        # ШАГ 3: Создаем PID файл для текущего экземпляра ПЕРЕД запуском
+        # Это важно - флаг должен быть установлен до того, как приложение начнет слушать порт
+        create_pid_file()
+        logger.info(f"PID файл создан: {PID_FILE} (PID: {os.getpid()})")
+    
+    # В дочернем процессе также регистрируем обработчик для удаления PID файла
+    if is_werkzeug_main:
+        atexit.register(remove_pid_file)
+    
     logger.info("=" * 60)
     logger.info("Запуск Flask приложения...")
     logger.info(f"Сервер будет доступен по адресу: http://{FLASK_HOST}:{FLASK_PORT}")
     logger.info("Нажмите Ctrl+C для остановки")
     logger.info("=" * 60)
     
-    print("=" * 60)
-    print("Запуск Flask приложения...")
-    print(f"Сервер будет доступен по адресу: http://{FLASK_HOST}:{FLASK_PORT}")
-    print("Нажмите Ctrl+C для остановки")
-    print("=" * 60)
+    print_green("=" * 60)
+    print_green("Запуск Flask приложения...")
+    print_green(f"Сервер будет доступен по адресу: http://{FLASK_HOST}:{FLASK_PORT}")
+    print_green("Нажмите Ctrl+C для остановки")
+    print_green("=" * 60)
     
-    app.run(debug=FLASK_DEBUG, host=FLASK_HOST, port=FLASK_PORT)
+    # Flask reloader в debug режиме запускает приложение дважды:
+    # 1. Основной процесс (parent) - только для мониторинга изменений
+    # 2. Дочерний процесс (child) - рабочий сервер
+    # Используем use_reloader=False, чтобы избежать двойного запуска
+    # или проверяем WERKZEUG_RUN_MAIN для создания агентов только в дочернем процессе
+    app.run(debug=FLASK_DEBUG, host=FLASK_HOST, port=FLASK_PORT, use_reloader=True)
 
