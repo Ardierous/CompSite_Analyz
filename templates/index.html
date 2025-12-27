@@ -42,11 +42,23 @@
             <div id="progressText" class="progress-text">0%</div>
         </div>
         
-        <div id="resultContainer" class="result-container" style="display: none;">
-            <div class="result-header">
-                <h2>Результаты анализа</h2>
-                <button id="closeResult" class="close-btn">×</button>
+        <div id="resultInfo" class="result-info" style="display: none;">
+            <div id="costInfo" class="cost-info" style="display: none;">
+                <span class="cost-label">Стоимость:</span>
+                <span id="costValue" class="cost-value">—</span>
             </div>
+            <div id="resultActions" class="result-actions" style="display: none;">
+                <button id="exportDocxBtn" class="action-btn export-btn">
+                    <span>📄 Экспорт в DOCX</span>
+                </button>
+                <button id="newAnalysisBtn" class="action-btn new-analysis-btn">
+                    <span>🔄 Анализ другого сайта</span>
+                </button>
+            </div>
+        </div>
+        
+        <div id="resultContainer" class="result-container" style="display: none;">
+            <h2 class="result-title">Результаты анализа</h2>
             <div id="resultContent" class="result-content"></div>
         </div>
         

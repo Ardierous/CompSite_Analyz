@@ -7,17 +7,58 @@
 import subprocess
 import sys
 import os
+import shlex
+
+# Установка кодировки UTF-8 для Windows консоли
+if sys.platform == 'win32':
+    # Устанавливаем кодировку консоли через chcp 65001 (скрываем вывод)
+    try:
+        subprocess.run('chcp 65001 >nul 2>&1', shell=True, check=False)
+    except:
+        pass
+    # Устанавливаем кодировку через Windows API
+    try:
+        import ctypes
+        kernel32 = ctypes.windll.kernel32
+        kernel32.SetConsoleOutputCP(65001)  # UTF-8
+        kernel32.SetConsoleCP(65001)  # UTF-8
+    except:
+        pass
+    # Настраиваем stdout и stderr для UTF-8 с обработкой ошибок
+    try:
+        import io
+        if hasattr(sys.stdout, 'buffer'):
+            sys.stdout = io.TextIOWrapper(
+                sys.stdout.buffer, 
+                encoding='utf-8', 
+                errors='replace', 
+                line_buffering=True
+            )
+        if hasattr(sys.stderr, 'buffer'):
+            sys.stderr = io.TextIOWrapper(
+                sys.stderr.buffer, 
+                encoding='utf-8', 
+                errors='replace', 
+                line_buffering=True
+            )
+    except:
+        pass
 
 # Конфигурация репозитория
 GITHUB_USERNAME = "Ardierous"
 REPO_NAME = "CompSite_Analyz"
 REMOTE_URL = f"https://github.com/{GITHUB_USERNAME}/{REPO_NAME}.git"
+BRANCH_NAME = "main"
 
-def run_command(command, description):
+# Константы для форматирования
+SEPARATOR = "=" * 60
+
+def run_command(command, description, silent=False):
     """Выполняет команду и выводит результат"""
-    print(f"\n{'='*60}")
-    print(f"{description}...")
-    print(f"{'='*60}")
+    if not silent:
+        print(f"\n{SEPARATOR}")
+        print(f"{description}...")
+        print(f"{SEPARATOR}")
     
     try:
         result = subprocess.run(
@@ -26,15 +67,17 @@ def run_command(command, description):
             check=True,
             capture_output=True,
             text=True,
-            encoding='utf-8'
+            encoding='utf-8',
+            errors='replace'  # Заменяем неверные символы вместо ошибки
         )
-        if result.stdout:
-            print(result.stdout)
+        if result.stdout and not silent:
+            print(result.stdout.strip())
         return True
     except subprocess.CalledProcessError as e:
-        print(f"Ошибка: {e}")
-        if e.stderr:
-            print(f"Детали: {e.stderr}")
+        if not silent:
+            print(f"Ошибка: {e}")
+            if e.stderr:
+                print(f"Детали: {e.stderr.strip()}")
         return False
 
 def check_git_installed():
@@ -53,7 +96,7 @@ def check_git_repo():
         print("Git репозиторий не инициализирован. Инициализация...")
         if not run_command("git init", "Инициализация Git репозитория"):
             return False
-        if not run_command("git branch -M main", "Настройка основной ветки"):
+        if not run_command(f"git branch -M {BRANCH_NAME}", "Настройка основной ветки"):
             return False
     return True
 
@@ -85,23 +128,60 @@ def setup_remote():
 
 def get_commit_message():
     """Запрашивает у пользователя сообщение коммита"""
-    print("\n" + "="*60)
+    print(f"\n{SEPARATOR}")
     print("Введите сообщение коммита:")
-    print("="*60)
+    print(f"{SEPARATOR}")
     
-    message = input("> ").strip()
+    try:
+        message = input("> ").strip()
+    except (UnicodeDecodeError, UnicodeEncodeError):
+        # Если возникла проблема с кодировкой, используем альтернативный способ
+        if sys.platform == 'win32':
+            import msvcrt
+            print("> ", end='', flush=True)
+            chars = []
+            while True:
+                char = msvcrt.getch()
+                if char == b'\r':  # Enter
+                    break
+                elif char == b'\x08':  # Backspace
+                    if chars:
+                        chars.pop()
+                        print('\b \b', end='', flush=True)
+                else:
+                    try:
+                        char_str = char.decode('utf-8')
+                        chars.append(char_str)
+                        print(char_str, end='', flush=True)
+                    except:
+                        pass
+            print()  # Новая строка после ввода
+            message = ''.join(chars).strip()
+        else:
+            message = input("> ").strip()
     
     if not message:
-        print("Сообщение коммита не может быть пустым!")
+        print("⚠ Сообщение коммита не может быть пустым!")
         return get_commit_message()
     
+    # Возвращаем сообщение как есть, экранирование будет в функции создания коммита
     return message
 
+def check_changes():
+    """Проверяет, есть ли изменения для коммита"""
+    result = subprocess.run(
+        "git status --porcelain",
+        shell=True,
+        capture_output=True,
+        text=True
+    )
+    return bool(result.stdout.strip())
+
 def main():
-    print("="*60)
+    print(SEPARATOR)
     print("Отправка кода в GitHub репозиторий")
     print(f"Репозиторий: {GITHUB_USERNAME}/{REPO_NAME}")
-    print("="*60)
+    print(SEPARATOR)
     
     # Проверка Git
     if not check_git_installed():
@@ -117,51 +197,72 @@ def main():
         print("Не удалось настроить remote")
         sys.exit(1)
     
-    # Запрос сообщения коммита
-    commit_message = get_commit_message()
-    
-    # Добавление файлов
-    if not run_command("git add .", "Добавление файлов"):
-        print("Не удалось добавить файлы")
-        sys.exit(1)
-    
-    # Проверка, есть ли изменения для коммита
-    result = subprocess.run(
-        "git diff --cached --quiet",
-        shell=True,
-        capture_output=True
-    )
-    if result.returncode == 0:
-        print("\nНет изменений для коммита. Все файлы уже закоммичены.")
+    # Проверка наличия изменений
+    if not check_changes():
+        print("\n⚠ Нет изменений для коммита.")
         response = input("Выполнить push существующих коммитов? (y/n): ").strip().lower()
         if response != 'y':
             print("Операция отменена")
             sys.exit(0)
     else:
+        # Запрос сообщения коммита
+        commit_message = get_commit_message()
+        
+        # Добавление файлов
+        if not run_command("git add .", "Добавление файлов"):
+            print("❌ Не удалось добавить файлы")
+            sys.exit(1)
+        
         # Создание коммита
-        if not run_command(f'git commit -m "{commit_message}"', "Создание коммита"):
-            print("Не удалось создать коммит")
+        # Используем правильное экранирование для Windows с кириллицей
+        # Передаем сообщение через stdin для надежности
+        try:
+            commit_process = subprocess.Popen(
+                ['git', 'commit', '-m', commit_message],
+                stdin=subprocess.PIPE,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                text=True,
+                encoding='utf-8'
+            )
+            stdout, stderr = commit_process.communicate()
+            
+            if commit_process.returncode != 0:
+                print(f"❌ Не удалось создать коммит")
+                if stderr:
+                    print(f"Ошибка: {stderr.strip()}")
+                sys.exit(1)
+            else:
+                print(f"✓ Коммит создан: {commit_message}")
+                if stdout:
+                    print(stdout.strip())
+        except Exception as e:
+            print(f"❌ Ошибка при создании коммита: {e}")
             sys.exit(1)
     
     # Отправка в GitHub
-    print("\n" + "="*60)
+    print(f"\n{SEPARATOR}")
     print("Отправка кода в GitHub...")
-    print("="*60)
+    print(f"{SEPARATOR}")
     
-    if not run_command("git push -u origin main", "Отправка в GitHub"):
-        print("\nВозможные причины ошибки:")
-        print("1. Репозиторий не создан на GitHub")
-        print("2. Проблемы с аутентификацией")
-        print("3. Конфликт с удаленным репозиторием")
-        print("\nПопробуйте:")
-        print(f"  - Создать репозиторий: https://github.com/new (название: {REPO_NAME})")
-        print("  - Использовать Personal Access Token для аутентификации")
+    if not run_command(f"git push -u origin {BRANCH_NAME}", "Отправка в GitHub"):
+        print(f"\n{SEPARATOR}")
+        print("❌ Ошибка при отправке кода")
+        print(f"{SEPARATOR}")
+        print("\nВозможные причины:")
+        print("  1. Репозиторий не создан на GitHub")
+        print("  2. Проблемы с аутентификацией")
+        print("  3. Конфликт с удаленным репозиторием")
+        print("\nРешения:")
+        print(f"  • Создать репозиторий: https://github.com/new (название: {REPO_NAME})")
+        print("  • Использовать Personal Access Token для аутентификации")
+        print("  • Проверить права доступа к репозиторию")
         sys.exit(1)
     
-    print("\n" + "="*60)
+    print(f"\n{SEPARATOR}")
     print("✓ Код успешно отправлен в GitHub!")
     print(f"Репозиторий: https://github.com/{GITHUB_USERNAME}/{REPO_NAME}")
-    print("="*60)
+    print(f"{SEPARATOR}")
 
 if __name__ == '__main__':
     try:

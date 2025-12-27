@@ -1,12 +1,78 @@
 from crewai import Agent, Task, Crew, Process
 import os
+import json
+from datetime import datetime
+from pathlib import Path
 
 from dotenv import load_dotenv
 load_dotenv()
 
+# Вспомогательная функция для записи в debug.log (опционально)
+def write_debug_log(data):
+    """Безопасно записывает данные в debug.log, если файл доступен"""
+    try:
+        debug_log_path = os.getenv('DEBUG_LOG_PATH')
+        if not debug_log_path:
+            # Пытаемся использовать путь по умолчанию, если он существует
+            default_path = Path(__file__).parent / '.cursor' / 'debug.log'
+            if default_path.parent.exists():
+                debug_log_path = str(default_path)
+            else:
+                return  # Не записываем, если путь недоступен
+        
+        with open(debug_log_path, 'a', encoding='utf-8') as f:
+            f.write(json.dumps(data) + '\n')
+    except:
+        pass  # Игнорируем ошибки записи в debug.log
+
+# #region agent log
+write_debug_log({
+    "sessionId": "debug-session",
+    "runId": "init",
+    "hypothesisId": "A",
+    "location": "Agents_crew.py:7",
+    "message": "Импорт CrewAI модулей",
+    "data": {"timestamp": datetime.now().isoformat()}
+})
+# #endregion
+
 # Настройка переменных окружения для OpenAI
 api_key = os.getenv("OPENAI_API_KEY")
 api_base = os.getenv("OPENAI_API_BASE")
+
+# #region agent log
+write_debug_log({
+    "sessionId": "debug-session",
+    "runId": "init",
+    "hypothesisId": "C",
+    "location": "Agents_crew.py:15",
+    "message": "Проверка переменных окружения телеметрии",
+    "data": {
+        "CREWAI_TELEMETRY_OPT_OUT": os.getenv("CREWAI_TELEMETRY_OPT_OUT"),
+        "CREWAI_TRACING_ENABLED": os.getenv("CREWAI_TRACING_ENABLED"),
+        "timestamp": datetime.now().isoformat()
+    }
+})
+# #endregion
+
+# Отключение телеметрии CrewAI
+os.environ["CREWAI_TELEMETRY_OPT_OUT"] = "1"
+os.environ["CREWAI_TRACING_ENABLED"] = "false"
+
+# #region agent log
+write_debug_log({
+    "sessionId": "debug-session",
+    "runId": "init",
+    "hypothesisId": "C",
+    "location": "Agents_crew.py:22",
+    "message": "Установка переменных для отключения телеметрии",
+    "data": {
+        "CREWAI_TELEMETRY_OPT_OUT": os.environ.get("CREWAI_TELEMETRY_OPT_OUT"),
+        "CREWAI_TRACING_ENABLED": os.environ.get("CREWAI_TRACING_ENABLED"),
+        "timestamp": datetime.now().isoformat()
+    }
+})
+# #endregion
 
 if api_key:
     os.environ["OPENAI_API_KEY"] = api_key
@@ -255,6 +321,17 @@ task_3_report = Task(
     output_file="task_3_final_report.md",
 )
 
+# #region agent log
+write_debug_log({
+    "sessionId": "debug-session",
+    "runId": "init",
+    "hypothesisId": "A",
+    "location": "Agents_crew.py:258",
+    "message": "Создание объекта Crew",
+    "data": {"timestamp": datetime.now().isoformat()}
+})
+# #endregion
+
 crew = Crew(
     agents=[web_scraper_agent, data_analyzer_agent, bi_engineer_agent],
     tasks=[task_1_scrape, task_2_analyze, task_3_report],
@@ -262,6 +339,17 @@ crew = Crew(
     process="sequential",  # Выполнение задач последовательно
     output_file="crew_output.md",
 )
+
+# #region agent log
+write_debug_log({
+    "sessionId": "debug-session",
+    "runId": "init",
+    "hypothesisId": "A",
+    "location": "Agents_crew.py:264",
+    "message": "Объект Crew создан",
+    "data": {"timestamp": datetime.now().isoformat()}
+})
+# #endregion
 
 # ============================================================================
 # ЗАПУСК CREW

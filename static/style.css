@@ -185,31 +185,33 @@ body {
     font-weight: 500;
 }
 
+.result-info {
+    margin-top: 20px;
+    margin-bottom: 20px;
+    display: flex;
+    flex-direction: column;
+    gap: 16px;
+    flex-shrink: 0;
+}
+
 .result-container {
-    margin-top: 30px;
+    margin-top: 0;
     padding: 24px;
     background: var(--bg-color);
     border-radius: 12px;
     border: 1px solid var(--border-color);
     max-height: 600px;
     overflow-y: auto;
-}
-
-.result-header {
     display: flex;
-    justify-content: space-between;
-    align-items: center;
-    margin-bottom: 20px;
-    position: sticky;
-    top: 0;
-    background: var(--bg-color);
-    padding-bottom: 16px;
-    border-bottom: 1px solid var(--border-color);
+    flex-direction: column;
 }
 
-.result-header h2 {
-    font-size: 1.3rem;
+.result-title {
+    font-size: 1.5rem;
     font-weight: 600;
+    margin: 0 0 20px 0;
+    color: var(--text-primary);
+    flex-shrink: 0;
 }
 
 .close-btn {
@@ -234,11 +236,85 @@ body {
     color: var(--text-primary);
 }
 
+.cost-info {
+    padding: 8px 12px;
+    background: rgba(16, 185, 129, 0.1);
+    border: 1px solid var(--success-color);
+    border-radius: 6px;
+    display: inline-flex;
+    align-items: center;
+    gap: 8px;
+    width: auto;
+}
+
+.cost-label {
+    color: var(--text-secondary);
+    font-size: 0.9rem;
+}
+
+.cost-value {
+    color: var(--success-color);
+    font-size: 1rem;
+    font-weight: 600;
+}
+
 .result-content {
     color: var(--text-secondary);
     white-space: pre-wrap;
     word-wrap: break-word;
     line-height: 1.8;
+    flex: 1;
+    overflow-y: auto;
+}
+
+.result-actions {
+    display: flex;
+    gap: 12px;
+    flex-wrap: wrap;
+}
+
+.action-btn {
+    flex: 1;
+    min-width: 180px;
+    padding: 14px 24px;
+    font-size: 1rem;
+    font-weight: 600;
+    border: none;
+    border-radius: 10px;
+    cursor: pointer;
+    transition: all 0.3s ease;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    gap: 8px;
+}
+
+.export-btn {
+    background: linear-gradient(135deg, #10b981 0%, #059669 100%);
+    color: white;
+}
+
+.export-btn:hover {
+    transform: translateY(-2px);
+    box-shadow: 0 8px 20px rgba(16, 185, 129, 0.4);
+}
+
+.export-btn:active {
+    transform: translateY(0);
+}
+
+.new-analysis-btn {
+    background: linear-gradient(135deg, var(--primary-color) 0%, #8b5cf6 100%);
+    color: white;
+}
+
+.new-analysis-btn:hover {
+    transform: translateY(-2px);
+    box-shadow: 0 8px 20px rgba(99, 102, 241, 0.4);
+}
+
+.new-analysis-btn:active {
+    transform: translateY(0);
 }
 
 .error-container {

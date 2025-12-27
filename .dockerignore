@@ -7,6 +7,7 @@ __pycache__/
 *.egg-info/
 dist/
 build/
+*.egg
 
 # Виртуальное окружение
 venv/
@@ -17,6 +18,7 @@ ENV/
 # IDE
 .vscode/
 .idea/
+.cursor/
 *.swp
 *.swo
 *~
@@ -27,25 +29,49 @@ Thumbs.db
 
 # Логи
 *.log
+logs/
+*.log.*
 
 # Файлы окружения
 .env
 .env.local
 .env.*.local
 
-# Результаты анализа (опционально, можно оставить для тестирования)
-# task_*.md
-# crew_output.md
+# Результаты анализа
+task_*.md
+crew_output.md
 
 # Git
 .git/
 .gitignore
+.gitattributes
 
 # Docker
 Dockerfile
 .dockerignore
 docker-compose.yml
+.docker/
 
 # Документация
 README.md
+*.md
+!requirements.txt
+
+# Временные файлы
+*.tmp
+*.bak
+*.swp
+*.swo
+
+# Скрипты разработки
+push_to_github.py
+push_git.bat
+GIT_SETUP.md
+
+# Тесты
+.pytest_cache/
+.coverage
+htmlcov/
+test_*.py
+*_test.py
 
