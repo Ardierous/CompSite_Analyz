@@ -24,10 +24,11 @@
 
 ## Технологии
 
-- **Backend**: Python 3.12+, Flask 3.1+
+- **Backend**: Python 3.11, Flask 3.1+
 - **AI Framework**: CrewAI 1.6.0+
 - **Frontend**: HTML5, CSS3, JavaScript (Vanilla)
 - **LLM**: OpenAI GPT-4
+- **Containerization**: Docker
 
 ## Структура проекта
 
@@ -36,51 +37,50 @@ Company/
 ├── main.py                 # Flask веб-приложение
 ├── Agents_crew.py          # Конфигурация AI-агентов
 ├── requirements.txt        # Зависимости проекта
+├── .python-version         # Версия Python (3.11)
+├── runtime.txt             # Версия Python для платформ
+├── Dockerfile              # Конфигурация Docker
+├── docker-compose.yml      # Docker Compose конфигурация
+├── .dockerignore           # Исключения для Docker
 ├── templates/
 │   └── index.html         # Главная страница
-├── static/
-│   ├── style.css          # Стили интерфейса
-│   └── script.js          # Логика фронтенда
-└── venv/                  # Виртуальное окружение
+└── static/
+    ├── style.css          # Стили интерфейса
+    └── script.js          # Логика фронтенда
 ```
 
 ## Установка
 
 ### Требования
 
-- Python 3.12 или выше (рекомендуется Python 3.12)
+- **Python 3.11** (обязательно, проект настроен только на эту версию)
 - pip (менеджер пакетов Python)
 - OpenAI API ключ (или совместимый сервис)
+- Docker (опционально, для контейнеризации)
+
+**Важно:** Проект использует только Python 3.11. Использование других версий может привести к ошибкам при установке зависимостей.
 
 ### Шаги установки
 
 1. **Клонируйте репозиторий или скачайте проект**
 
-2. **Создайте виртуальное окружение** (рекомендуется):
+2. **Убедитесь, что используется Python 3.11**:
 ```bash
-python -m venv venv
+python --version  # Должно быть Python 3.11.x
 ```
 
-3. **Активируйте виртуальное окружение**:
-   - Windows (PowerShell):
-   ```powershell
-   .\venv\Scripts\Activate.ps1
-   ```
-   - Windows (CMD):
-   ```cmd
-   venv\Scripts\activate.bat
-   ```
-   - Linux/Mac:
+   Если используется другая версия, используйте:
    ```bash
-   source venv/bin/activate
+   py -3.11 --version  # Windows
+   python3.11 --version  # Linux/Mac
    ```
 
-4. **Установите зависимости**:
+3. **Установите зависимости**:
 ```bash
 pip install -r requirements.txt
 ```
 
-5. **Настройте переменные окружения**:
+4. **Настройте переменные окружения**:
    
    Создайте файл `.env` в корне проекта:
    ```
@@ -90,17 +90,47 @@ pip install -r requirements.txt
 
 ## Запуск
 
-1. **Активируйте виртуальное окружение** (если еще не активировано)
+### Локальный запуск
 
-2. **Запустите приложение**:
+1. **Запустите приложение**:
 ```bash
 python main.py
 ```
+
+   Или с явным указанием версии:
+   ```bash
+   py -3.11 main.py  # Windows
+   python3.11 main.py  # Linux/Mac
+   ```
+
+2. **Откройте браузер** и перейдите по адресу:
+```
+http://localhost:5000
+```
+
+### Запуск в Docker
+
+1. **Соберите Docker образ**:
+```bash
+docker build -t company-analyzer .
+```
+
+2. **Запустите контейнер**:
+```bash
+docker run -p 5000:5000 --env-file .env company-analyzer
+```
+
+   Или используйте Docker Compose:
+   ```bash
+   docker-compose up
+   ```
 
 3. **Откройте браузер** и перейдите по адресу:
 ```
 http://localhost:5000
 ```
+
+**Примечание:** Docker автоматически использует Python 3.11 из официального образа `python:3.11-slim`.
 
 ## Использование
 

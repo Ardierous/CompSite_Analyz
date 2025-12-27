@@ -4,8 +4,14 @@ import os
 from dotenv import load_dotenv
 load_dotenv()
 
-os.environ["OPENAI_API_KEY"]=os.getenv("OPENAI_API_KEY")
-os.environ["OPENAI_API_BASE"]=os.getenv("OPENAI_API_BASE")
+# Настройка переменных окружения для OpenAI
+api_key = os.getenv("OPENAI_API_KEY")
+api_base = os.getenv("OPENAI_API_BASE")
+
+if api_key:
+    os.environ["OPENAI_API_KEY"] = api_key
+if api_base:
+    os.environ["OPENAI_API_BASE"] = api_base
 
 # ============================================================================
 # АГЕНТ 1: Web Scraper (Считыватель информации с корпоративного сайта)

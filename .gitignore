@@ -58,3 +58,11 @@ htmlcov/
 .dmypy.json
 dmypy.json
 
+# CrewAI generated files
+task_*.md
+crew_output.md
+
+# Temporary files
+*.tmp
+*.bak
+*.swp
