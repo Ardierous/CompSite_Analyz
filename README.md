@@ -70,6 +70,8 @@ Company/
 │   ├── push_to_github.py   # Скрипт для отправки в GitHub
 │   ├── push_to_dockerhub.py # Скрипт для отправки в Docker Hub
 │   ├── stop_app.py         # Скрипт для принудительного завершения приложения
+│   ├── setup_firewall.sh   # Скрипт для автоматической настройки файрвола UFW (VPS)
+│   ├── start_app.sh        # Скрипт для автоматического запуска приложения на VPS
 │   ├── push_git.bat        # Batch скрипт для запуска push
 │   ├── push_dockerhub.bat  # Batch скрипт для запуска push в Docker Hub
 │   ├── stop_app.bat        # Batch скрипт для запуска stop_app.py
@@ -120,6 +122,8 @@ Company/
    ```bash
    pip install -r requirements.txt
    ```
+
+   **Важно:** `requirements.txt` включает `crewai[tools]>=0.11.2`, который устанавливает CrewAI с инструментами для веб-скрапинга. Если установка завершилась с предупреждением, убедитесь, что все зависимости установлены корректно.
 
 4. **Настройте переменные окружения:**
 
@@ -473,8 +477,10 @@ app.run(debug=False, host='0.0.0.0', port=5000)
 1. **Проверьте установку CrewAI:**
 
    ```bash
-   pip install crewai[tools]>=0.11.2
+   pip install "crewai[tools]>=0.11.2"
    ```
+
+   **Важно:** `requirements.txt` уже содержит `crewai[tools]>=0.11.2`, но если установка не прошла, выполните команду выше.
 
 2. **Проверьте логи** в файле `.cursor/debug.log` для детальной информации
 
@@ -487,6 +493,10 @@ app.run(debug=False, host='0.0.0.0', port=5000)
    ```bash
    pip install -r requirements.txt
    ```
+
+5. **Для Docker контейнеров:**
+   - Убедитесь, что образ пересобран после изменений в `requirements.txt`
+   - Для продакшена: пересоберите и запушьте образ в Docker Hub, затем обновите на VPS через `docker-compose pull`
 
 ### Стоимость анализа не отображается
 
