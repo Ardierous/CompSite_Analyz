@@ -11,5 +11,6 @@ numpy<2.0
 # CrewAI and AI dependencies
 # IMPORTANT: Current crewai version (0.11.2) requires Python 3.9-3.11
 # Recommended: Use Python 3.11 (stable, widely supported)
-crewai>=0.11.2
+# Устанавливаем crewai с инструментами (tools extras включает все необходимые зависимости)
+crewai[tools]>=0.11.2
 openai>=1.7.1,<2.0.0

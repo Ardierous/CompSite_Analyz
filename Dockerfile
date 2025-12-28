@@ -31,9 +31,10 @@ COPY requirements.txt .
 RUN pip install --no-cache-dir --upgrade pip && \
     pip install --no-cache-dir -r requirements.txt && \
     pip install --no-cache-dir --force-reinstall "numpy<2.0" && \
-    pip install --no-cache-dir crewai[tools] && \
-    python -c "import numpy; print(f'NumPy version: {numpy.__version__}')" && \
-    python -c "import crewai; print(f'CrewAI version: {crewai.__version__ if hasattr(crewai, \"__version__\") else \"unknown\"}')" && \
+    python -c "import numpy; print(f'✓ NumPy version: {numpy.__version__}')" && \
+    python -c "import crewai; print(f'✓ CrewAI version: {crewai.__version__ if hasattr(crewai, \"__version__\") else \"unknown\"}')" && \
+    python -c "from crewai import Agent, Task, Crew, Process; print('✓ CrewAI основные модули импортированы')" && \
+    python -c "from crewai_tools import ScrapeWebsiteTool; print('✓ CrewAI tools доступны')" 2>/dev/null || (echo "⚠️  CrewAI tools не установлены" && pip install --no-cache-dir "crewai[tools]>=0.11.2" && python -c "from crewai_tools import ScrapeWebsiteTool; print('✓ CrewAI tools установлены')") && \
     echo "✓ Все зависимости установлены успешно"
 
 # Копируем остальные файлы проекта (исключая .env через .dockerignore)

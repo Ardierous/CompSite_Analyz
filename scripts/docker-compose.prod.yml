@@ -3,6 +3,10 @@ version: '3.8'
 services:
   web:
     # Образ из Docker Hub - не требует локальной сборки
+    # ВАЖНО: После изменений в Dockerfile или requirements.txt нужно:
+    # 1. Пересобрать образ локально: docker build -t avardous/comp_site_analyz:latest .
+    # 2. Запушить в Docker Hub: docker push avardous/comp_site_analyz:latest
+    # 3. На VPS обновить образ: docker-compose -f scripts/docker-compose.prod.yml pull
     image: avardous/comp_site_analyz:latest
     container_name: comp-site-analyz
     ports:
