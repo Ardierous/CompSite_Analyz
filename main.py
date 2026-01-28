@@ -15,6 +15,7 @@ import subprocess
 import socket
 import atexit
 import signal
+import unicodedata
 warnings.filterwarnings('ignore')
 
 # Путь к PID файлу
@@ -343,6 +344,194 @@ try:
 except ImportError:
     DOCX_AVAILABLE = False
 
+import re
+
+
+# Символы и эмодзи, которые часто используются как маркеры списка (буллиты)
+_BULLET_CHARS = (
+    '•', '●', '○', '▪', '▫', '◦', '∙', '►', '⬤', '➤', '→',
+    '🟢', '🔵', '🔴', '🟡', '⬜', '🟦', '🟥', '⭐', '✅', '❌', '❗', '▪️',
+)
+
+
+def _strip_leading_bullet_chars(text):
+    """Убирает из начала текста все символы-буллиты (• ✅ и т.д.), чтобы в DOCX оставался только читаемый текст."""
+    if not text or not text.strip():
+        return text.strip()
+    t = text.strip()
+    while t:
+        found = False
+        for sym in sorted(_BULLET_CHARS, key=lambda s: -len(s)):
+            if t.startswith(sym):
+                t = t[len(sym):].lstrip()
+                found = True
+                break
+        if not found:
+            break
+    return t
+
+
+def _replace_md_images(text):
+    """Заменяет синтаксис картинок ![alt](url) на текст (alt или [изображение]), чтобы не ломать буллиты."""
+    return re.sub(r'!\[([^\]]*)\]\([^)]+\)', lambda m: ('[' + m.group(1) + ']') if m.group(1).strip() else '[изображение]', text)
+
+
+def _line_starts_with_emoji_bullet(stripped):
+    """Проверяет, начинается ли строка с эмодзи/символа-буллета и продолжается текстом."""
+    if not stripped or len(stripped) < 2:
+        return False, None
+    # Сравниваем с более длинными маркерами первыми (▪️ до ▪)
+    for sym in sorted(_BULLET_CHARS, key=lambda s: -len(s)):
+        if stripped.startswith(sym):
+            rest = stripped[len(sym):].lstrip()
+            if rest or sym in ('•', '●', '○', '▪', '▫'):
+                return True, rest
+            return False, None
+    # Один символ из категории "Symbol, other" (эмодзи, спецсимволы) + пробелы + текст
+    import unicodedata
+    first = stripped[0]
+    if ord(first) > 0x1F and not first.isalnum() and first not in '#*-`':
+        if unicodedata.category(first) == 'So' and len(stripped) > 1:
+            rest = stripped[1:].lstrip()
+            if rest:
+                return True, rest
+    return False, None
+
+
+def _add_inline_formatted(paragraph, text):
+    """Добавляет в параграф текст с поддержкой **жирный**, *курсив*, `код`; картинки заменяются на подпись."""
+    text = _replace_md_images(text)
+    # Простой разбор **bold** и *italic* по очереди (без конфликта с [])
+    pattern = r'(\*\*[^*]+\*\*|\*[^*]+\*|`[^`]+`|[^*`]+)'
+    for part in re.findall(pattern, text):
+        if part.startswith('**') and part.endswith('**'):
+            run = paragraph.add_run(part[2:-2] + ' ')
+            run.bold = True
+        elif part.startswith('*') and part.endswith('*') and len(part) > 1:
+            run = paragraph.add_run(part[1:-1] + ' ')
+            run.italic = True
+        elif part.startswith('`') and part.endswith('`'):
+            run = paragraph.add_run(part[1:-1] + ' ')
+            run.font.name = 'Consolas'
+        else:
+            paragraph.add_run(part)
+
+
+def _get_line_type(stripped):
+    """Определяет тип строки: heading, list или para. Для решения, вставлять ли пустую строку."""
+    if not stripped:
+        return None
+    if re.match(r'^#{1,6}\s+', stripped):
+        return 'heading'
+    if re.match(r'^[-*]\s+', stripped) or re.match(r'^\d+\.\s+', stripped):
+        return 'list'
+    if _line_starts_with_emoji_bullet(stripped)[0]:
+        return 'list'
+    return 'para'
+
+
+def _md_to_docx_content(doc, md_text):
+    """Заполняет документ python-docx контентом из Markdown."""
+    style = doc.styles['Normal']
+    style.font.name = 'Calibri'
+    style.font.size = Pt(11)
+    lines = md_text.replace('\r\n', '\n').replace('\r', '\n').split('\n')
+    i = 0
+    in_fence = False
+    fence_char = None
+    code_lines = []
+    last_type = None
+    while i < len(lines):
+        line = lines[i]
+        if line.strip().startswith('```'):
+            if not in_fence:
+                in_fence = True
+                fence_char = '```'
+                code_lines = []
+            else:
+                # Конец блока кода
+                if code_lines:
+                    p = doc.add_paragraph()
+                    p.style = 'Normal'
+                    run = p.add_run('\n'.join(code_lines))
+                    run.font.name = 'Consolas'
+                    run.font.size = Pt(10)
+                in_fence = False
+            i += 1
+            last_type = 'code'
+            continue
+        if in_fence:
+            code_lines.append(line)
+            i += 1
+            continue
+        stripped = line.strip()
+        if not stripped:
+            # Пустые строки:
+            # - не вставляем вокруг заголовков (до и после)
+            # - не вставляем между пунктами списка
+            j = i + 1
+            while j < len(lines) and not lines[j].strip():
+                j += 1
+            next_stripped = lines[j].strip() if j < len(lines) else ''
+            next_type = _get_line_type(next_stripped) if next_stripped else None
+            add_blank = len(doc.paragraphs) > 0
+            # Вокруг заголовков пустую строку не добавляем вовсе
+            if add_blank and (last_type == 'heading' or next_type == 'heading'):
+                add_blank = False
+            # Между пунктами списка (и список↔заголовок) пустые строки не нужны
+            if add_blank and last_type == 'list' and next_type in ('list', 'heading'):
+                add_blank = False
+            if add_blank:
+                doc.add_paragraph()
+            i = j
+            continue
+        # Заголовки # ## ###
+        m = re.match(r'^(#{1,6})\s+(.+)$', stripped)
+        if m:
+            level = min(len(m.group(1)), 4)  # 1–4 для Heading 1–4
+            doc.add_heading(m.group(2).strip(), level=level)
+            i += 1
+            last_type = 'heading'
+            continue
+        # Нумерованный список
+        if re.match(r'^\d+\.\s+', stripped):
+            text = _strip_leading_bullet_chars(re.sub(r'^\d+\.\s+', '', stripped))
+            p = doc.add_paragraph(style='List Number')
+            _add_inline_formatted(p, text)
+            i += 1
+            last_type = 'list'
+            continue
+        # Маркированный список - или *
+        if re.match(r'^[-*]\s+', stripped) or re.match(r'^\s{0,3}[-*]\s+', line):
+            text = _strip_leading_bullet_chars(re.sub(r'^\s*[-*]\s+', '', stripped))
+            p = doc.add_paragraph(style='List Bullet')
+            _add_inline_formatted(p, text)
+            i += 1
+            last_type = 'list'
+            continue
+        # Буллеты-эмодзи/символы (🟢 текст, • пункт и т.п.) — тот же List Bullet, все маркеры убираем
+        is_emoji_bullet, rest = _line_starts_with_emoji_bullet(stripped)
+        if is_emoji_bullet and rest:
+            rest = _strip_leading_bullet_chars(rest)
+            p = doc.add_paragraph(style='List Bullet')
+            _add_inline_formatted(p, rest)
+            i += 1
+            last_type = 'list'
+            continue
+        # Строка только с картинкой (часто под буллетом) — дописываем к предыдущему параграфу
+        if re.fullmatch(r'\s*!\[[^\]]*\]\([^)]+\)\s*', stripped) and len(doc.paragraphs) > 0:
+            last_p = doc.paragraphs[-1]
+            last_p.add_run(' ')
+            _add_inline_formatted(last_p, stripped)
+            i += 1
+            continue
+        # Обычный параграф
+        p = doc.add_paragraph()
+        _add_inline_formatted(p, stripped)
+        i += 1
+        last_type = 'para'
+    return doc
+
 # Импорт модулей логирования и отслеживания расходов
 try:
     from logger import logger
@@ -387,7 +576,23 @@ if is_werkzeug_main or not FLASK_DEBUG:
             error_msg = "CrewAI не доступен. Проверьте установку зависимостей."
             logger.error(error_msg)
             print(f"ОШИБКА: {error_msg}")
-            print("Проверьте логи выше для детальной информации об ошибке.")
+            print("\nДиагностика:")
+            # Проверяем, что именно пошло не так
+            try:
+                from Agents_crew import CREWAI_IMPORTED
+                if not CREWAI_IMPORTED:
+                    print("  ❌ CrewAI модуль не импортирован")
+                    print("  Решение: pip install 'crewai[tools]>=0.11.2'")
+                else:
+                    print("  ⚠️  CrewAI импортирован, но объект crew не создан")
+                    print("  Возможные причины:")
+                    print("    - Ошибка при создании агентов")
+                    print("    - Ошибка при создании задач")
+                    print("    - Ошибка при создании Crew объекта")
+                    print("  Запустите: python check_crewai.py для детальной диагностики")
+            except:
+                pass
+            print("\nПроверьте логи выше для детальной информации об ошибке.")
             CREW_AVAILABLE = False
         else:
             CREW_AVAILABLE = True
@@ -856,24 +1061,39 @@ def export_to_docx(task_id):
         
         doc.add_paragraph()  # Пустая строка
         
-        # Основной контент
+        # Основной контент — схлопываем пустые строки, распознаём списки и эмодзи-буллиты
         content = result_data.get('result', '')
         if content:
-            # Разбиваем на параграфы по строкам
-            lines = content.split('\n')
-            for line in lines:
-                line = line.strip()
-                if not line:
-                    doc.add_paragraph()
+            lines = content.replace('\r\n', '\n').replace('\r', '\n').split('\n')
+            i = 0
+            while i < len(lines):
+                line = lines[i]
+                stripped = line.strip()
+                if not stripped:
+                    j = i + 1
+                    while j < len(lines) and not lines[j].strip():
+                        j += 1
+                    if len(doc.paragraphs) > 6:
+                        doc.add_paragraph()
+                    i = j
                     continue
-                
-                # Определяем заголовки (если строка короткая и в верхнем регистре или содержит маркеры)
-                if (len(line) < 100 and 
-                    (line.isupper() or line.startswith('#') or 
-                     any(line.startswith(marker) for marker in ['I.', 'II.', 'III.', 'IV.', 'V.', 'VI.', 'VII.', 'VIII.', 'IX.', 'X.']))):
-                    heading = doc.add_heading(line, level=1)
+                if (len(stripped) < 100 and
+                    (stripped.isupper() or stripped.startswith('#') or
+                     any(stripped.startswith(m) for m in ['I.', 'II.', 'III.', 'IV.', 'V.', 'VI.', 'VII.', 'VIII.', 'IX.', 'X.']))):
+                    doc.add_heading(stripped, level=1)
+                elif re.match(r'^[-*]\s+', stripped):
+                    text = _strip_leading_bullet_chars(re.sub(r'^[-*]\s+', '', stripped))
+                    p = doc.add_paragraph(style='List Bullet')
+                    p.add_run(text)
                 else:
-                    para = doc.add_paragraph(line)
+                    is_emoji_bullet, rest = _line_starts_with_emoji_bullet(stripped)
+                    if is_emoji_bullet and rest:
+                        p = doc.add_paragraph(style='List Bullet')
+                        p.add_run(_strip_leading_bullet_chars(rest))
+                        i += 1
+                        continue
+                    doc.add_paragraph(stripped)
+                i += 1
         
         # Сохраняем в память
         file_stream = io.BytesIO()
@@ -896,6 +1116,42 @@ def export_to_docx(task_id):
     except Exception as e:
         logger.error(f"Ошибка при экспорте в DOCX для задачи {task_id}: {e}", exc_info=True)
         return jsonify({'error': f'Ошибка при создании документа: {str(e)}'}), 500
+
+
+@app.route('/api/convert/md-to-docx', methods=['POST'])
+def convert_md_to_docx():
+    """Принимает MD-файл, конвертирует в DOCX и возвращает файл для скачивания."""
+    if not DOCX_AVAILABLE:
+        return jsonify({'error': 'Модуль python-docx не установлен'}), 500
+    uploaded = request.files.get('file')
+    if not uploaded or uploaded.filename == '':
+        return jsonify({'error': 'Файл не выбран'}), 400
+    if not (uploaded.filename.lower().endswith('.md') or (getattr(uploaded, 'content_type', '') or '').startswith('text/')):
+        return jsonify({'error': 'Требуется файл Markdown (.md)'}), 400
+    try:
+        md_bytes = uploaded.read()
+        try:
+            md_text = md_bytes.decode('utf-8')
+        except UnicodeDecodeError:
+            md_text = md_bytes.decode('utf-8-sig')
+        doc = Document()
+        _md_to_docx_content(doc, md_text)
+        file_stream = io.BytesIO()
+        doc.save(file_stream)
+        file_stream.seek(0)
+        base_name = Path(uploaded.filename).stem
+        safe_name = "".join(c for c in base_name if c.isalnum() or c in (' ', '-', '_')).rstrip() or 'document'
+        download_name = f"{safe_name}_{datetime.now().strftime('%Y%m%d')}.docx"
+        return send_file(
+            file_stream,
+            mimetype='application/vnd.openxmlformats-officedocument.wordprocessingml.document',
+            as_attachment=True,
+            download_name=download_name,
+        )
+    except Exception as e:
+        logger.error(f"Ошибка конвертации MD → DOCX: {e}", exc_info=True)
+        return jsonify({'error': f'Ошибка конвертации: {str(e)}'}), 500
+
 
 if __name__ == '__main__':
     # Проверяем, что это дочерний процесс Flask reloader (рабочий сервер)

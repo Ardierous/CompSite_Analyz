@@ -15,6 +15,15 @@ const costValue = document.getElementById('costValue');
 const resultActions = document.getElementById('resultActions');
 const exportDocxBtn = document.getElementById('exportDocxBtn');
 const newAnalysisBtn = document.getElementById('newAnalysisBtn');
+const instrumentsBlock = document.getElementById('instrumentsBlock');
+const analysisSection = document.getElementById('analysisSection');
+const btnMdToDocx = document.getElementById('btnMdToDocx');
+const btnAnalysis = document.getElementById('btnAnalysis');
+const backToInstrumentsBtn = document.getElementById('backToInstrumentsBtn');
+const toolModalOverlay = document.getElementById('toolModalOverlay');
+const toolModalCloseBtn = document.getElementById('toolModalCloseBtn');
+const toolModalMdToDocxBtn = document.getElementById('toolModalMdToDocxBtn');
+const mdFileInput = document.getElementById('mdFileInput');
 
 let currentTaskId = null;
 let currentResult = null;
@@ -333,3 +342,108 @@ document.getElementById('closeError').addEventListener('click', () => {
     errorContainer.style.display = 'none';
 });
 
+// Главный экран: кнопка «MD → DOCX» открывает модалку конвертера
+if (btnMdToDocx && toolModalOverlay) {
+    btnMdToDocx.addEventListener('click', () => {
+        toolModalOverlay.style.display = 'flex';
+        toolModalOverlay.setAttribute('aria-hidden', 'false');
+    });
+}
+
+// Кнопка «Анализ корпоративного сайта» — показываем секцию анализа
+if (btnAnalysis && instrumentsBlock && analysisSection) {
+    btnAnalysis.addEventListener('click', () => {
+        instrumentsBlock.style.display = 'none';
+        analysisSection.style.display = 'block';
+    });
+}
+
+// «К инструментам» — возврат на главный экран с двумя кнопками
+if (backToInstrumentsBtn && instrumentsBlock && analysisSection) {
+    backToInstrumentsBtn.addEventListener('click', () => {
+        instrumentsBlock.style.display = 'block';
+        analysisSection.style.display = 'none';
+        errorContainer.style.display = 'none';
+    });
+}
+if (toolModalCloseBtn && toolModalOverlay) {
+    toolModalCloseBtn.addEventListener('click', () => {
+        toolModalOverlay.style.display = 'none';
+        toolModalOverlay.setAttribute('aria-hidden', 'true');
+    });
+}
+if (toolModalOverlay) {
+    toolModalOverlay.addEventListener('click', (e) => {
+        if (e.target === toolModalOverlay) {
+            toolModalOverlay.style.display = 'none';
+            toolModalOverlay.setAttribute('aria-hidden', 'true');
+        }
+    });
+}
+
+// MD → DOCX: по клику на кнопку в модалке — выбор файла
+if (toolModalMdToDocxBtn && mdFileInput) {
+    toolModalMdToDocxBtn.addEventListener('click', () => {
+        mdFileInput.value = '';
+        mdFileInput.click();
+    });
+}
+// После выбора .md — отправка на сервер и скачивание DOCX
+if (mdFileInput) {
+    mdFileInput.addEventListener('change', async () => {
+        const file = mdFileInput.files[0];
+        if (!file) return;
+        const btn = toolModalMdToDocxBtn;
+        if (btn) btn.disabled = true;
+        try {
+            const formData = new FormData();
+            formData.append('file', file);
+            const response = await fetch('/api/convert/md-to-docx', {
+                method: 'POST',
+                body: formData,
+            });
+            const contentType = response.headers.get('content-type');
+            if (!response.ok) {
+                if (toolModalOverlay) {
+                    toolModalOverlay.style.display = 'none';
+                    toolModalOverlay.setAttribute('aria-hidden', 'true');
+                }
+                if (contentType && contentType.includes('application/json')) {
+                    const err = await response.json();
+                    showError(err.error || 'Ошибка конвертации');
+                } else {
+                    showError(`Ошибка ${response.status}: ${response.statusText}`);
+                }
+                return;
+            }
+            const blob = await response.blob();
+            const url = window.URL.createObjectURL(blob);
+            const a = document.createElement('a');
+            a.href = url;
+            const name = response.headers.get('content-disposition');
+            let filename = (file.name || 'document').replace(/\.md$/i, '') + '_converted.docx';
+            if (name && name.includes('filename=')) {
+                const m = name.match(/filename\*?=['"]?(?:UTF-8'')?([^'";\n]+)/i) || name.match(/filename=['"]?([^'";\n]+)/);
+                if (m) filename = m[1].trim();
+            }
+            a.download = filename;
+            document.body.appendChild(a);
+            a.click();
+            window.URL.revokeObjectURL(url);
+            document.body.removeChild(a);
+            if (toolModalOverlay) {
+                toolModalOverlay.style.display = 'none';
+                toolModalOverlay.setAttribute('aria-hidden', 'true');
+            }
+        } catch (e) {
+            if (toolModalOverlay) {
+                toolModalOverlay.style.display = 'none';
+                toolModalOverlay.setAttribute('aria-hidden', 'true');
+            }
+            showError('Ошибка при конвертации: ' + (e.message || String(e)));
+        } finally {
+            mdFileInput.value = '';
+            if (btn) btn.disabled = false;
+        }
+    });
+}

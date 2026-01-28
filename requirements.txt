@@ -9,8 +9,9 @@ python-docx>=1.1.0
 numpy<2.0
 
 # CrewAI and AI dependencies
-# IMPORTANT: Current crewai version (0.11.2) requires Python 3.9-3.11
+# IMPORTANT: CrewAI requires Python 3.9-3.11
 # Recommended: Use Python 3.11 (stable, widely supported)
 # Устанавливаем crewai с инструментами (tools extras включает все необходимые зависимости)
+# Поддерживаются версии от 0.11.2 и выше (включая 1.7.2+)
 crewai[tools]>=0.11.2
 openai>=1.7.1,<2.0.0
