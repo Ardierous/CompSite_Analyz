@@ -478,11 +478,15 @@ def _md_to_docx_content(doc, md_text):
             # Вокруг заголовков пустую строку не добавляем вовсе
             if add_blank and (last_type == 'heading' or next_type == 'heading'):
                 add_blank = False
-            # Между пунктами списка (и список↔заголовок) пустые строки не нужны
-            if add_blank and last_type == 'list' and next_type in ('list', 'heading'):
+            # Между пунктами списка (и список↔заголовок), а также
+            # между абзацем-расшифровкой и следующим пунктом списка — пустые строки убираем
+            if add_blank and last_type in ('list', 'para') and next_type == 'list':
                 add_blank = False
             if add_blank:
-                doc.add_paragraph()
+                p_blank = doc.add_paragraph()
+                pf = p_blank.paragraph_format
+                pf.space_before = Pt(0)
+                pf.space_after = Pt(0)
             i = j
             continue
         # Заголовки # ## ###
@@ -497,7 +501,22 @@ def _md_to_docx_content(doc, md_text):
         if re.match(r'^\d+\.\s+', stripped):
             text = _strip_leading_bullet_chars(re.sub(r'^\d+\.\s+', '', stripped))
             p = doc.add_paragraph(style='List Number')
+            pf_list = p.paragraph_format
+            pf_list.space_before = Pt(0)
+            pf_list.space_after = Pt(0)
             _add_inline_formatted(p, text)
+            # Пробуем слить следующую строку как расшифровку в тот же пункт (через перенос строки)
+            next_i = i + 1
+            if next_i < len(lines):
+                next_raw = lines[next_i]
+                next_stripped = next_raw.strip()
+                if next_stripped and _get_line_type(next_stripped) == 'para':
+                    run_br = p.add_run()
+                    run_br.add_break()
+                    _add_inline_formatted(p, next_stripped)
+                    i = next_i + 1
+                    last_type = 'list'
+                    continue
             i += 1
             last_type = 'list'
             continue
@@ -505,7 +524,22 @@ def _md_to_docx_content(doc, md_text):
         if re.match(r'^[-*]\s+', stripped) or re.match(r'^\s{0,3}[-*]\s+', line):
             text = _strip_leading_bullet_chars(re.sub(r'^\s*[-*]\s+', '', stripped))
             p = doc.add_paragraph(style='List Bullet')
+            pf_list = p.paragraph_format
+            pf_list.space_before = Pt(0)
+            pf_list.space_after = Pt(0)
             _add_inline_formatted(p, text)
+            # Пробуем слить следующую строку как расшифровку в тот же пункт (через перенос строки)
+            next_i = i + 1
+            if next_i < len(lines):
+                next_raw = lines[next_i]
+                next_stripped = next_raw.strip()
+                if next_stripped and _get_line_type(next_stripped) == 'para':
+                    run_br = p.add_run()
+                    run_br.add_break()
+                    _add_inline_formatted(p, next_stripped)
+                    i = next_i + 1
+                    last_type = 'list'
+                    continue
             i += 1
             last_type = 'list'
             continue
@@ -514,7 +548,22 @@ def _md_to_docx_content(doc, md_text):
         if is_emoji_bullet and rest:
             rest = _strip_leading_bullet_chars(rest)
             p = doc.add_paragraph(style='List Bullet')
+            pf_list = p.paragraph_format
+            pf_list.space_before = Pt(0)
+            pf_list.space_after = Pt(0)
             _add_inline_formatted(p, rest)
+            # Пробуем слить следующую строку как расшифровку в тот же пункт (через перенос строки)
+            next_i = i + 1
+            if next_i < len(lines):
+                next_raw = lines[next_i]
+                next_stripped = next_raw.strip()
+                if next_stripped and _get_line_type(next_stripped) == 'para':
+                    run_br = p.add_run()
+                    run_br.add_break()
+                    _add_inline_formatted(p, next_stripped)
+                    i = next_i + 1
+                    last_type = 'list'
+                    continue
             i += 1
             last_type = 'list'
             continue
@@ -630,6 +679,31 @@ FLASK_HOST = os.getenv('FLASK_HOST', '0.0.0.0')
 FLASK_PORT = int(os.getenv('FLASK_PORT', 5000))
 FLASK_DEBUG = os.getenv('FLASK_DEBUG', 'True').lower() == 'true'
 
+# Скрытый режим администратора: пароль для доступа к анализу сайта
+ADMIN_KEY = '123654+'  # Код для входа в режим смены пароля
+PASSWORD_FILE = Path(__file__).parent / 'data' / '.admin_password'
+DEFAULT_PASSWORD = '111'
+
+
+def _ensure_password_file():
+    """Создаёт директорию data и файл пароля с дефолтным значением, если их нет."""
+    PASSWORD_FILE.parent.mkdir(parents=True, exist_ok=True)
+    if not PASSWORD_FILE.exists():
+        PASSWORD_FILE.write_text(DEFAULT_PASSWORD, encoding='utf-8')
+
+
+def get_stored_password():
+    """Возвращает сохранённый пароль для доступа к анализу сайта."""
+    _ensure_password_file()
+    return PASSWORD_FILE.read_text(encoding='utf-8').strip()
+
+
+def set_stored_password(new_password):
+    """Сохраняет новый пароль (только при вызове с известным ADMIN_KEY)."""
+    _ensure_password_file()
+    PASSWORD_FILE.write_text(new_password.strip(), encoding='utf-8')
+
+
 # Хранилище результатов анализа (в продакшене использовать Redis или БД)
 analysis_results = {}
 analysis_status = {}
@@ -639,6 +713,36 @@ analysis_costs = {}  # Хранилище расходов по задачам
 def index():
     logger.info("Главная страница открыта")
     return render_template('index.html')
+
+
+@app.route('/api/auth/check', methods=['POST'])
+def auth_check():
+    """Проверка пароля: верный пароль разблокирует анализ; 123654+ — вход в режим смены пароля."""
+    if not request.json:
+        return jsonify({'error': 'Требуется JSON'}), 400
+    password = (request.json.get('password') or '').strip()
+    if password == ADMIN_KEY:
+        return jsonify({'ok': True, 'admin': True})
+    stored = get_stored_password()
+    if password == stored:
+        return jsonify({'ok': True, 'admin': False})
+    return jsonify({'ok': False})
+
+
+@app.route('/api/auth/change-password', methods=['POST'])
+def auth_change_password():
+    """Смена пароля доступа к анализу (только при знании кода администратора)."""
+    if not request.json:
+        return jsonify({'error': 'Требуется JSON'}), 400
+    admin_key = (request.json.get('admin_key') or '').strip()
+    new_password = (request.json.get('new_password') or '').strip()
+    if admin_key != ADMIN_KEY:
+        return jsonify({'error': 'Неверный код администратора'}), 403
+    if not new_password:
+        return jsonify({'error': 'Новый пароль не может быть пустым'}), 400
+    set_stored_password(new_password)
+    return jsonify({'ok': True})
+
 
 @app.route('/api/analyze', methods=['POST'])
 def analyze():
@@ -1059,7 +1163,11 @@ def export_to_docx(task_id):
         if cost is not None:
             doc.add_paragraph(f'Стоимость анализа: {cost:.4f} руб.')
         
-        doc.add_paragraph()  # Пустая строка
+        # Пустая строка без дополнительных отступов
+        p_blank_header = doc.add_paragraph()
+        pf_header = p_blank_header.paragraph_format
+        pf_header.space_before = Pt(0)
+        pf_header.space_after = Pt(0)
         
         # Основной контент — схлопываем пустые строки, распознаём списки и эмодзи-буллиты
         content = result_data.get('result', '')
@@ -1073,8 +1181,12 @@ def export_to_docx(task_id):
                     j = i + 1
                     while j < len(lines) and not lines[j].strip():
                         j += 1
+                    # Пустая строка внутри основного контента: одна, без внешних отступов
                     if len(doc.paragraphs) > 6:
-                        doc.add_paragraph()
+                        p_blank_body = doc.add_paragraph()
+                        pf_body = p_blank_body.paragraph_format
+                        pf_body.space_before = Pt(0)
+                        pf_body.space_after = Pt(0)
                     i = j
                     continue
                 if (len(stripped) < 100 and
@@ -1084,11 +1196,17 @@ def export_to_docx(task_id):
                 elif re.match(r'^[-*]\s+', stripped):
                     text = _strip_leading_bullet_chars(re.sub(r'^[-*]\s+', '', stripped))
                     p = doc.add_paragraph(style='List Bullet')
+                    pf_list = p.paragraph_format
+                    pf_list.space_before = Pt(0)
+                    pf_list.space_after = Pt(0)
                     p.add_run(text)
                 else:
                     is_emoji_bullet, rest = _line_starts_with_emoji_bullet(stripped)
                     if is_emoji_bullet and rest:
                         p = doc.add_paragraph(style='List Bullet')
+                        pf_list = p.paragraph_format
+                        pf_list.space_before = Pt(0)
+                        pf_list.space_after = Pt(0)
                         p.add_run(_strip_leading_bullet_chars(rest))
                         i += 1
                         continue

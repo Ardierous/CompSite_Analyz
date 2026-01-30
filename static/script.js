@@ -24,6 +24,26 @@ const toolModalOverlay = document.getElementById('toolModalOverlay');
 const toolModalCloseBtn = document.getElementById('toolModalCloseBtn');
 const toolModalMdToDocxBtn = document.getElementById('toolModalMdToDocxBtn');
 const mdFileInput = document.getElementById('mdFileInput');
+const entryBtn = document.getElementById('entryBtn');
+const loginModalOverlay = document.getElementById('loginModalOverlay');
+const loginPasswordInput = document.getElementById('loginPasswordInput');
+const loginError = document.getElementById('loginError');
+const loginSubmitBtn = document.getElementById('loginSubmitBtn');
+const loginCancelBtn = document.getElementById('loginCancelBtn');
+const adminModalOverlay = document.getElementById('adminModalOverlay');
+const adminNewPasswordInput = document.getElementById('adminNewPasswordInput');
+const adminConfirmPasswordInput = document.getElementById('adminConfirmPasswordInput');
+const adminError = document.getElementById('adminError');
+const adminSaveBtn = document.getElementById('adminSaveBtn');
+const adminCloseBtn = document.getElementById('adminCloseBtn');
+
+const AUTH_STORAGE_KEY = 'analysisUnlocked';
+const ADMIN_CODE = '123654+';
+
+// При загрузке: кнопка анализа активна только если ранее был выполнен вход
+if (btnAnalysis) {
+    btnAnalysis.disabled = !sessionStorage.getItem(AUTH_STORAGE_KEY);
+}
 
 let currentTaskId = null;
 let currentResult = null;
@@ -366,6 +386,144 @@ if (backToInstrumentsBtn && instrumentsBlock && analysisSection) {
         errorContainer.style.display = 'none';
     });
 }
+
+// ——— Скрытый режим администратора: Вход и смена пароля ———
+function showLoginModal() {
+    if (loginModalOverlay && loginPasswordInput) {
+        loginPasswordInput.value = '';
+        if (loginError) { loginError.style.display = 'none'; loginError.textContent = ''; }
+        loginModalOverlay.style.display = 'flex';
+        loginModalOverlay.setAttribute('aria-hidden', 'false');
+        loginPasswordInput.focus();
+    }
+}
+function hideLoginModal() {
+    if (loginModalOverlay) {
+        loginModalOverlay.style.display = 'none';
+        loginModalOverlay.setAttribute('aria-hidden', 'true');
+    }
+}
+function showAdminModal() {
+    if (adminModalOverlay && adminNewPasswordInput && adminConfirmPasswordInput) {
+        adminNewPasswordInput.value = '';
+        adminConfirmPasswordInput.value = '';
+        if (adminError) { adminError.style.display = 'none'; adminError.textContent = ''; }
+        adminModalOverlay.style.display = 'flex';
+        adminModalOverlay.setAttribute('aria-hidden', 'false');
+        adminNewPasswordInput.focus();
+    }
+}
+function hideAdminModal() {
+    if (adminModalOverlay) {
+        adminModalOverlay.style.display = 'none';
+        adminModalOverlay.setAttribute('aria-hidden', 'true');
+    }
+}
+
+if (entryBtn) {
+    entryBtn.addEventListener('click', () => showLoginModal());
+}
+
+if (loginSubmitBtn && loginPasswordInput) {
+    async function doLogin() {
+        const password = loginPasswordInput.value.trim();
+        if (!password) return;
+        if (password === ADMIN_CODE) {
+            hideLoginModal();
+            showAdminModal();
+            return;
+        }
+        try {
+            const response = await fetch('/api/auth/check', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ password })
+            });
+            const data = await response.json();
+            if (data.ok && !data.admin) {
+                sessionStorage.setItem(AUTH_STORAGE_KEY, '1');
+                if (btnAnalysis) btnAnalysis.disabled = false;
+                hideLoginModal();
+            } else {
+                sessionStorage.removeItem(AUTH_STORAGE_KEY);
+                if (btnAnalysis) btnAnalysis.disabled = true;
+                if (loginError) {
+                    loginError.textContent = 'Неверный пароль';
+                    loginError.style.display = 'block';
+                }
+            }
+        } catch (e) {
+            sessionStorage.removeItem(AUTH_STORAGE_KEY);
+            if (btnAnalysis) btnAnalysis.disabled = true;
+            if (loginError) {
+                loginError.textContent = 'Ошибка проверки пароля';
+                loginError.style.display = 'block';
+            }
+        }
+    }
+    loginSubmitBtn.addEventListener('click', doLogin);
+    loginPasswordInput.addEventListener('keydown', (e) => { if (e.key === 'Enter') doLogin(); });
+}
+if (loginCancelBtn) {
+    loginCancelBtn.addEventListener('click', () => hideLoginModal());
+}
+if (loginModalOverlay) {
+    loginModalOverlay.addEventListener('click', (e) => {
+        if (e.target === loginModalOverlay) hideLoginModal();
+    });
+}
+
+if (adminSaveBtn && adminNewPasswordInput && adminConfirmPasswordInput) {
+    adminSaveBtn.addEventListener('click', async () => {
+        const newPwd = adminNewPasswordInput.value;
+        const confirmPwd = adminConfirmPasswordInput.value;
+        if (adminError) { adminError.style.display = 'none'; adminError.textContent = ''; }
+        if (newPwd !== confirmPwd) {
+            if (adminError) {
+                adminError.textContent = 'Пароли не совпадают';
+                adminError.style.display = 'block';
+            }
+            return;
+        }
+        if (!newPwd.trim()) {
+            if (adminError) {
+                adminError.textContent = 'Введите новый пароль';
+                adminError.style.display = 'block';
+            }
+            return;
+        }
+        try {
+            const response = await fetch('/api/auth/change-password', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ admin_key: ADMIN_CODE, new_password: newPwd.trim() })
+            });
+            const data = await response.json();
+            if (response.ok && data.ok) {
+                hideAdminModal();
+            } else {
+                if (adminError) {
+                    adminError.textContent = (data && data.error) || 'Ошибка сохранения';
+                    adminError.style.display = 'block';
+                }
+            }
+        } catch (e) {
+            if (adminError) {
+                adminError.textContent = 'Ошибка сети';
+                adminError.style.display = 'block';
+            }
+        }
+    });
+}
+if (adminCloseBtn) {
+    adminCloseBtn.addEventListener('click', () => hideAdminModal());
+}
+if (adminModalOverlay) {
+    adminModalOverlay.addEventListener('click', (e) => {
+        if (e.target === adminModalOverlay) hideAdminModal();
+    });
+}
+
 if (toolModalCloseBtn && toolModalOverlay) {
     toolModalCloseBtn.addEventListener('click', () => {
         toolModalOverlay.style.display = 'none';
