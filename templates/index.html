@@ -119,6 +119,20 @@
         <div id="toolModalOverlay" class="tool-modal-overlay" style="display: none;" aria-hidden="true">
             <div class="tool-modal" role="dialog" aria-labelledby="toolModalTitle">
                 <h3 id="toolModalTitle" class="tool-modal-title">MD → DOCX</h3>
+                <div id="toolModalError" class="tool-modal-error" style="display: none;" role="alert"></div>
+                <div class="md-docx-spacing" aria-label="Настройки отступов">
+                    <p class="md-docx-spacing-title">Отступы (пт): до и после</p>
+                    <table class="md-docx-spacing-table">
+                        <thead><tr><th></th><th>до</th><th>после</th></tr></thead>
+                        <tbody>
+                            <tr><td>Обычный текст</td><td><input type="number" id="mdDocxNormalBefore" min="0" max="72" value="0" step="1" aria-label="Отступ до обычного текста"></td><td><input type="number" id="mdDocxNormalAfter" min="0" max="72" value="0" step="1" aria-label="Отступ после обычного текста"></td></tr>
+                            <tr><td>Заголовок 1</td><td><input type="number" id="mdDocxH1Before" min="0" max="72" value="12" step="1" aria-label="Отступ до заголовка 1"></td><td><input type="number" id="mdDocxH1After" min="0" max="72" value="6" step="1" aria-label="Отступ после заголовка 1"></td></tr>
+                            <tr><td>Заголовок 2</td><td><input type="number" id="mdDocxH2Before" min="0" max="72" value="10" step="1" aria-label="Отступ до заголовка 2"></td><td><input type="number" id="mdDocxH2After" min="0" max="72" value="4" step="1" aria-label="Отступ после заголовка 2"></td></tr>
+                            <tr><td>Заголовок 3</td><td><input type="number" id="mdDocxH3Before" min="0" max="72" value="8" step="1" aria-label="Отступ до заголовка 3"></td><td><input type="number" id="mdDocxH3After" min="0" max="72" value="4" step="1" aria-label="Отступ после заголовка 3"></td></tr>
+                            <tr><td>Заголовок 4</td><td><input type="number" id="mdDocxH4Before" min="0" max="72" value="6" step="1" aria-label="Отступ до заголовка 4"></td><td><input type="number" id="mdDocxH4After" min="0" max="72" value="2" step="1" aria-label="Отступ после заголовка 4"></td></tr>
+                        </tbody>
+                    </table>
+                </div>
                 <div class="tool-modal-actions">
                     <button type="button" id="toolModalMdToDocxBtn" class="tool-modal-btn">
                         <span>Выбрать .md файл</span>

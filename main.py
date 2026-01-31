@@ -1,4 +1,4 @@
-from flask import Flask, render_template, request, jsonify, send_file
+from flask import Flask, render_template, request, jsonify, send_file, Response
 from flask_cors import CORS
 import os
 import threading
@@ -16,7 +16,12 @@ import socket
 import atexit
 import signal
 import unicodedata
+from concurrent.futures import ThreadPoolExecutor, TimeoutError as FuturesTimeoutError
+import time
 warnings.filterwarnings('ignore')
+
+_executor_md_docx = ThreadPoolExecutor(max_workers=2, thread_name_prefix='md2docx')
+MD_DOCX_TIMEOUT = 120
 
 # Путь к PID файлу
 PID_FILE = Path(__file__).parent / '.app.pid'
@@ -338,8 +343,9 @@ def write_debug_log(data):
 
 try:
     from docx import Document
-    from docx.shared import Pt, RGBColor, Inches
+    from docx.shared import Pt, RGBColor, Inches, Cm
     from docx.enum.text import WD_ALIGN_PARAGRAPH
+    from docx.enum.table import WD_ALIGN_VERTICAL
     DOCX_AVAILABLE = True
 except ImportError:
     DOCX_AVAILABLE = False
@@ -352,6 +358,7 @@ _BULLET_CHARS = (
     '•', '●', '○', '▪', '▫', '◦', '∙', '►', '⬤', '➤', '→',
     '🟢', '🔵', '🔴', '🟡', '⬜', '🟦', '🟥', '⭐', '✅', '❌', '❗', '▪️',
 )
+_BULLET_CHARS_SORTED = tuple(sorted(_BULLET_CHARS, key=lambda s: -len(s)))
 
 
 def _strip_leading_bullet_chars(text):
@@ -361,7 +368,7 @@ def _strip_leading_bullet_chars(text):
     t = text.strip()
     while t:
         found = False
-        for sym in sorted(_BULLET_CHARS, key=lambda s: -len(s)):
+        for sym in _BULLET_CHARS_SORTED:
             if t.startswith(sym):
                 t = t[len(sym):].lstrip()
                 found = True
@@ -372,21 +379,22 @@ def _strip_leading_bullet_chars(text):
 
 
 def _replace_md_images(text):
-    """Заменяет синтаксис картинок ![alt](url) на текст (alt или [изображение]), чтобы не ломать буллиты."""
-    return re.sub(r'!\[([^\]]*)\]\([^)]+\)', lambda m: ('[' + m.group(1) + ']') if m.group(1).strip() else '[изображение]', text)
+    """Заменяет синтаксис картинок ![alt](url) на текст (alt или [изображение]). Ограничения длины — против backtracking."""
+    return re.sub(r'!\[([^\]]{0,500})\]\([^)]{1,2000}\)', lambda m: ('[' + m.group(1) + ']') if m.group(1).strip() else '[изображение]', text)
 
 
 def _line_starts_with_emoji_bullet(stripped):
-    """Проверяет, начинается ли строка с эмодзи/символа-буллета и продолжается текстом."""
+    """Проверяет, начинается ли строка с эмодзи/символа-буллета и продолжается текстом.
+    Возвращает (True, bullet, rest) или (False, None, None); bullet — сам символ буллета для отображения в DOCX."""
     if not stripped or len(stripped) < 2:
-        return False, None
+        return False, None, None
     # Сравниваем с более длинными маркерами первыми (▪️ до ▪)
-    for sym in sorted(_BULLET_CHARS, key=lambda s: -len(s)):
+    for sym in _BULLET_CHARS_SORTED:
         if stripped.startswith(sym):
             rest = stripped[len(sym):].lstrip()
             if rest or sym in ('•', '●', '○', '▪', '▫'):
-                return True, rest
-            return False, None
+                return True, sym, rest
+            return False, None, None
     # Один символ из категории "Symbol, other" (эмодзи, спецсимволы) + пробелы + текст
     import unicodedata
     first = stripped[0]
@@ -394,27 +402,138 @@ def _line_starts_with_emoji_bullet(stripped):
         if unicodedata.category(first) == 'So' and len(stripped) > 1:
             rest = stripped[1:].lstrip()
             if rest:
-                return True, rest
-    return False, None
+                return True, first, rest
+    return False, None, None
+
+
+def _is_emoji_char(c):
+    """Проверка, что символ — эмодзи (для выбора шрифта Segoe UI Emoji)."""
+    if len(c) != 1:
+        return False
+    o = ord(c)
+    if 0x1F300 <= o <= 0x1F9FF or 0x2600 <= o <= 0x26FF or 0x2700 <= o <= 0x27BF:
+        return True
+    return unicodedata.category(c) == 'So'
+
+
+def _add_run_with_emoji_font(paragraph, text, bold=False, italic=False, strike=False, font_name=None):
+    """Добавляет текст в параграф, разбивая по эмодзи: сегменты с эмодзи — Segoe UI Emoji, остальное — Segoe UI (или font_name)."""
+    if not text:
+        return
+    base_font = font_name or 'Segoe UI'
+    segments = []
+    current, is_emoji_cur = [], None
+    for c in text:
+        is_e = _is_emoji_char(c)
+        if is_emoji_cur is None:
+            is_emoji_cur = is_e
+        if is_e == is_emoji_cur:
+            current.append(c)
+        else:
+            if current:
+                segments.append((is_emoji_cur, ''.join(current)))
+            current, is_emoji_cur = [c], is_e
+    if current:
+        segments.append((is_emoji_cur, ''.join(current)))
+    for is_emoji, seg in segments:
+        run = paragraph.add_run(seg)
+        run.font.name = 'Segoe UI Emoji' if is_emoji else base_font
+        run.bold = bold
+        run.italic = italic
+        run.font.strike = strike
+
+
+# ASCII-символы, экранируемые обратным слэшем в CommonMark
+_ESCAPABLE = set(r'!"#$%&\'()*+,\-./:;<=>?@[\]^_`{|}~')
+# Предкомпилированный regex для инлайн-разметки (вызывается на каждой строке)
+_RE_INLINE = re.compile(
+    r'(\*\*\*[^*]{1,300}\*\*\*|___[^_]{1,300}___|\*\*[^*]{1,300}\*\*|__[^_]{1,300}__|'
+    r'\*[^*]{1,300}\*|_[^_]{1,300}_|`[^`]{1,200}`|~~[^~]{1,200}~~|'
+    r'\[[^\]]{1,200}\]\([^)]{1,1500}\)|[^*`~\[]+)'
+)
+_RE_LINK = re.compile(r'\[([^\]]+)\]\(([^)]+)\)')
+
+
+def _apply_backslash_escapes(text):
+    """Обрабатывает экранирование \\ и \\X по CommonMark: \\ → \, \\* → * и т.д."""
+    result = []
+    i = 0
+    while i < len(text):
+        if text[i] == '\\' and i + 1 < len(text):
+            nxt = text[i + 1]
+            if nxt in _ESCAPABLE:
+                result.append(nxt)
+                i += 2
+                continue
+            if nxt == '\\':
+                result.append('\\')
+                i += 2
+                continue
+        result.append(text[i])
+        i += 1
+    return ''.join(result)
 
 
 def _add_inline_formatted(paragraph, text):
-    """Добавляет в параграф текст с поддержкой **жирный**, *курсив*, `код`; картинки заменяются на подпись."""
+    """Добавляет в параграф текст с поддержкой **/__ жирный, */_ курсив, `код`, ~~зачёркнутый~~, [текст](url); экранирование \\; картинки → подпись."""
     text = _replace_md_images(text)
-    # Простой разбор **bold** и *italic* по очереди (без конфликта с [])
-    pattern = r'(\*\*[^*]+\*\*|\*[^*]+\*|`[^`]+`|[^*`]+)'
-    for part in re.findall(pattern, text):
-        if part.startswith('**') and part.endswith('**'):
-            run = paragraph.add_run(part[2:-2] + ' ')
-            run.bold = True
+    text = _apply_backslash_escapes(text)
+    # Быстрый путь: нет спецсимволов — один add_run без regex (с разбивкой по эмодзи)
+    if '*' not in text and '_' not in text and '`' not in text and '~' not in text and '[' not in text:
+        _add_run_with_emoji_font(paragraph, text)
+        return
+    # Защита: много * или _ — возможен тяжёлый backtracking, добавляем как текст
+    if text.count('*') > 40 or text.count('_') > 40:
+        _add_run_with_emoji_font(paragraph, text)
+        return
+    # Ограничиваем длину, чтобы избежать катастрофического backtracking
+    _max_inline = 3000
+    if len(text) > _max_inline:
+        head, tail = text[: _max_inline], text[_max_inline:]
+        _add_inline_formatted(paragraph, head)
+        _add_run_with_emoji_font(paragraph, tail)
+        return
+    parts = _RE_INLINE.findall(text)
+    if not parts:
+        _add_run_with_emoji_font(paragraph, text)
+        return
+    for part in parts:
+        if part.startswith('***') and part.endswith('***'):
+            _add_run_with_emoji_font(paragraph, part[3:-3] + ' ', bold=True, italic=True)
+        elif part.startswith('___') and part.endswith('___'):
+            _add_run_with_emoji_font(paragraph, part[3:-3] + ' ', bold=True, italic=True)
+        elif part.startswith('**') and part.endswith('**'):
+            _add_run_with_emoji_font(paragraph, part[2:-2] + ' ', bold=True)
+        elif part.startswith('__') and part.endswith('__'):
+            _add_run_with_emoji_font(paragraph, part[2:-2] + ' ', bold=True)
         elif part.startswith('*') and part.endswith('*') and len(part) > 1:
-            run = paragraph.add_run(part[1:-1] + ' ')
-            run.italic = True
+            _add_run_with_emoji_font(paragraph, part[1:-1] + ' ', italic=True)
+        elif part.startswith('_') and part.endswith('_') and len(part) > 1:
+            _add_run_with_emoji_font(paragraph, part[1:-1] + ' ', italic=True)
         elif part.startswith('`') and part.endswith('`'):
-            run = paragraph.add_run(part[1:-1] + ' ')
-            run.font.name = 'Consolas'
+            _add_run_with_emoji_font(paragraph, part[1:-1] + ' ', font_name='Consolas')
+        elif part.startswith('~~') and part.endswith('~~'):
+            _add_run_with_emoji_font(paragraph, part[2:-2] + ' ', strike=True)
+        elif part.startswith('[') and '](' in part:
+            m = _RE_LINK.match(part)
+            if m:
+                _add_run_with_emoji_font(paragraph, m.group(1) + ' (' + m.group(2) + ') ')
+            else:
+                _add_run_with_emoji_font(paragraph, part)
         else:
-            paragraph.add_run(part)
+            _add_run_with_emoji_font(paragraph, part)
+
+
+def _normalize_task_list_text(text):
+    """Если текст начинается с [ ], [x] или [X], заменяет на ☐/☑ и возвращает обновлённый текст."""
+    if not text:
+        return text
+    m = re.match(r'^\[([ xX])\]\s*', text.strip())
+    if m:
+        checked = m.group(1).lower() == 'x'
+        rest = text.strip()[len(m.group(0)):]
+        return ('☑ ' if checked else '☐ ') + rest
+    return text
 
 
 def _get_line_type(stripped):
@@ -423,40 +542,111 @@ def _get_line_type(stripped):
         return None
     if re.match(r'^#{1,6}\s+', stripped):
         return 'heading'
-    if re.match(r'^[-*]\s+', stripped) or re.match(r'^\d+\.\s+', stripped):
+    if re.match(r'^[-*+]\s+', stripped) or re.match(r'^\d+\.\s+', stripped):
         return 'list'
-    if _line_starts_with_emoji_bullet(stripped)[0]:
+    if _line_starts_with_emoji_bullet(stripped)[0]:  # (is_emoji_bullet, bullet, rest)
         return 'list'
     return 'para'
 
 
-def _md_to_docx_content(doc, md_text):
-    """Заполняет документ python-docx контентом из Markdown."""
-    style = doc.styles['Normal']
-    style.font.name = 'Calibri'
-    style.font.size = Pt(11)
+def _parse_table_row(line):
+    """Парсит строку Markdown-таблицы в список ячеек (текст без лишних пробелов)."""
+    stripped = line.strip()
+    if not stripped or '|' not in stripped:
+        return []
+    parts = stripped.split('|')
+    # Убираем пустые крайние от разделителей: | a | b | -> ['', ' a ', ' b ', '']
+    cells = [p.strip() for p in parts[1:-1]] if len(parts) >= 3 else []
+    return cells
+
+
+def _is_table_separator_row(cells):
+    """Проверяет, является ли строка разделителем таблицы (|---|---|)."""
+    if not cells:
+        return False
+    return all(re.match(r'^:?-+:?$', c.strip()) for c in cells)
+
+
+def _table_row_like(line):
+    """Проверяет, похожа ли строка на строку таблицы (начинается с | и есть ещё |)."""
+    s = line.strip()
+    return len(s) >= 2 and s.startswith('|') and s.count('|') >= 2
+
+
+def _md_to_docx_content(doc, md_text, spacing=None):
+    """Заполняет документ python-docx контентом из Markdown. spacing — опциональный dict с отступами (пт) для Normal и Heading 1–4."""
+    t0 = time.perf_counter()
+    # Значения по умолчанию для отступов (пт)
+    def_pt = lambda d, key, subkey: (d or {}).get(key, {}).get(subkey, 0)
+    if spacing is None:
+        spacing = {}
+    # Иерархия кегля: обычный текст меньше любого заголовка, каждый уровень заголовка меньше предыдущего
+    doc.styles['Normal'].font.name = 'Segoe UI'
+    doc.styles['Normal'].font.size = Pt(11)
+    doc.styles['Normal'].paragraph_format.space_before = Pt(def_pt(spacing, 'normal', 'before'))
+    doc.styles['Normal'].paragraph_format.space_after = Pt(def_pt(spacing, 'normal', 'after'))
+    for level, size_pt in [(1, 16), (2, 14), (3, 13), (4, 12)]:
+        try:
+            h_style = doc.styles[f'Heading {level}']
+            h_style.font.name = 'Segoe UI'
+            h_style.font.size = Pt(size_pt)
+            h_style.paragraph_format.space_before = Pt(def_pt(spacing, f'heading{level}', 'before'))
+            h_style.paragraph_format.space_after = Pt(def_pt(spacing, f'heading{level}', 'after'))
+        except KeyError:
+            pass
+    # Страница A4, поля: слева 2 см, справа 1,5 см
+    try:
+        section = doc.sections[0]
+        section.page_width = Cm(21)
+        section.page_height = Cm(29.7)
+        section.left_margin = Cm(2)
+        section.right_margin = Cm(1.5)
+    except Exception:
+        pass
     lines = md_text.replace('\r\n', '\n').replace('\r', '\n').split('\n')
+    n_lines = len(lines)
     i = 0
     in_fence = False
     fence_char = None
     code_lines = []
     last_type = None
+    _log = None
+    try:
+        from logger import logger as _log
+    except ImportError:
+        pass
+    iter_limit = n_lines + 200
     while i < len(lines):
+        iter_limit -= 1
+        if iter_limit <= 0:
+            if _log:
+                _log.error("md-to-docx: превышен лимит итераций, возможный бесконечный цикл")
+            print("md-to-docx: ОШИБКА — превышен лимит итераций", flush=True)
+            break
+        if i % 10 == 0 or i == 1:
+            msg = f"md-to-docx: строка {i+1}/{n_lines}, прошло {time.perf_counter() - t0:.2f} с"
+            if _log:
+                _log.info(msg)
+            print(msg, flush=True)
         line = lines[i]
-        if line.strip().startswith('```'):
+        stripped_line = line.strip()
+        # Ограждённый блок кода: ``` или ~~~ (CommonMark)
+        is_fence_start = stripped_line.startswith('```') or stripped_line.startswith('~~~')
+        if is_fence_start:
+            fence_prefix = stripped_line[:3]
             if not in_fence:
                 in_fence = True
-                fence_char = '```'
+                fence_char = fence_prefix
                 code_lines = []
             else:
-                # Конец блока кода
-                if code_lines:
-                    p = doc.add_paragraph()
-                    p.style = 'Normal'
-                    run = p.add_run('\n'.join(code_lines))
-                    run.font.name = 'Consolas'
-                    run.font.size = Pt(10)
-                in_fence = False
+                if stripped_line.startswith(fence_char):
+                    if code_lines:
+                        p = doc.add_paragraph()
+                        p.style = 'Normal'
+                        run = p.add_run('\n'.join(code_lines))
+                        run.font.name = 'Consolas'
+                        run.font.size = Pt(10)
+                    in_fence = False
             i += 1
             last_type = 'code'
             continue
@@ -466,40 +656,80 @@ def _md_to_docx_content(doc, md_text):
             continue
         stripped = line.strip()
         if not stripped:
-            # Пустые строки:
-            # - не вставляем вокруг заголовков (до и после)
-            # - не вставляем между пунктами списка
+            # Пустые строки в MD пропускаем — заголовки и блоки имеют свои отступы
             j = i + 1
             while j < len(lines) and not lines[j].strip():
                 j += 1
-            next_stripped = lines[j].strip() if j < len(lines) else ''
-            next_type = _get_line_type(next_stripped) if next_stripped else None
-            add_blank = len(doc.paragraphs) > 0
-            # Вокруг заголовков пустую строку не добавляем вовсе
-            if add_blank and (last_type == 'heading' or next_type == 'heading'):
-                add_blank = False
-            # Между пунктами списка (и список↔заголовок), а также
-            # между абзацем-расшифровкой и следующим пунктом списка — пустые строки убираем
-            if add_blank and last_type in ('list', 'para') and next_type == 'list':
-                add_blank = False
-            if add_blank:
-                p_blank = doc.add_paragraph()
-                pf = p_blank.paragraph_format
-                pf.space_before = Pt(0)
-                pf.space_after = Pt(0)
             i = j
             continue
-        # Заголовки # ## ###
+        # Горизонтальная линия (thematic break): только один тип символа, 3+ шт. (CommonMark)
+        if re.match(r'^(\*{3,}|_{3,}|-{3,})\s*$', stripped):
+            p_hr = doc.add_paragraph()
+            p_hr.paragraph_format.space_before = Pt(3)
+            p_hr.paragraph_format.space_after = Pt(3)
+            try:
+                p_hr.paragraph_format.border_bottom.width = Pt(0.5)
+                p_hr.paragraph_format.border_bottom.color = RGBColor(0xC0, 0xC0, 0xC0)
+            except Exception:
+                pass
+            i += 1
+            last_type = 'para'
+            continue
+        # Цитата (blockquote): одна или несколько строк, начинающихся с >
+        if stripped.startswith('>'):
+            quote_lines = []
+            j = i
+            while j < len(lines) and lines[j].strip().startswith('>'):
+                q = lines[j].strip()
+                q = re.sub(r'^>\s*', '', q)
+                quote_lines.append(q)
+                j += 1
+            p_q = doc.add_paragraph()
+            p_q.paragraph_format.left_indent = Pt(24)
+            p_q.paragraph_format.space_before = Pt(0)
+            p_q.paragraph_format.space_after = Pt(0)
+            for idx, qline in enumerate(quote_lines):
+                if idx > 0:
+                    p_q.add_run().add_break()
+                _add_inline_formatted(p_q, qline)
+            for run in p_q.runs:
+                run.italic = True
+            i = j
+            last_type = 'para'
+            continue
+        # Индентационный блок кода (4 пробела или таб)
+        if (line.startswith('    ') or line.startswith('\t')) and not in_fence:
+            code_lines_indent = []
+            j = i
+            while j < len(lines) and (lines[j].startswith('    ') or lines[j].startswith('\t')):
+                ln = lines[j]
+                code_lines_indent.append(ln[4:] if ln.startswith('    ') else (ln[1:] if ln.startswith('\t') else ln))
+                j += 1
+            if code_lines_indent:
+                p_code = doc.add_paragraph()
+                p_code.style = 'Normal'
+                run_code = p_code.add_run('\n'.join(code_lines_indent))
+                run_code.font.name = 'Consolas'
+                run_code.font.size = Pt(10)
+            i = j
+            last_type = 'code'
+            continue
+        # Заголовки # ## ### — только 2 уровня: # и ## → H1, ### и глубже → H2 (эмодзи через Segoe UI Emoji)
         m = re.match(r'^(#{1,6})\s+(.+)$', stripped)
         if m:
-            level = min(len(m.group(1)), 4)  # 1–4 для Heading 1–4
-            doc.add_heading(m.group(2).strip(), level=level)
+            level = 1 if len(m.group(1)) <= 2 else 2
+            head_text = m.group(2).strip()
+            p_h = doc.add_heading(head_text, level=level)
+            p_h.clear()
+            _add_run_with_emoji_font(p_h, head_text)
+            for run in p_h.runs:
+                run.font.size = Pt([16, 14, 13, 12][min(level, 4) - 1])
             i += 1
             last_type = 'heading'
             continue
         # Нумерованный список
         if re.match(r'^\d+\.\s+', stripped):
-            text = _strip_leading_bullet_chars(re.sub(r'^\d+\.\s+', '', stripped))
+            text = _normalize_task_list_text(_strip_leading_bullet_chars(re.sub(r'^\d+\.\s+', '', stripped)))
             p = doc.add_paragraph(style='List Number')
             pf_list = p.paragraph_format
             pf_list.space_before = Pt(0)
@@ -520,9 +750,9 @@ def _md_to_docx_content(doc, md_text):
             i += 1
             last_type = 'list'
             continue
-        # Маркированный список - или *
-        if re.match(r'^[-*]\s+', stripped) or re.match(r'^\s{0,3}[-*]\s+', line):
-            text = _strip_leading_bullet_chars(re.sub(r'^\s*[-*]\s+', '', stripped))
+        # Маркированный список -, * или + (CommonMark)
+        if re.match(r'^[-*+]\s+', stripped) or re.match(r'^\s{0,3}[-*+]\s+', line):
+            text = _normalize_task_list_text(_strip_leading_bullet_chars(re.sub(r'^\s*[-*+]\s+', '', stripped)))
             p = doc.add_paragraph(style='List Bullet')
             pf_list = p.paragraph_format
             pf_list.space_before = Pt(0)
@@ -543,15 +773,15 @@ def _md_to_docx_content(doc, md_text):
             i += 1
             last_type = 'list'
             continue
-        # Буллеты-эмодзи/символы (🟢 текст, • пункт и т.п.) — тот же List Bullet, все маркеры убираем
-        is_emoji_bullet, rest = _line_starts_with_emoji_bullet(stripped)
-        if is_emoji_bullet and rest:
-            rest = _strip_leading_bullet_chars(rest)
+        # Буллеты-эмодзи/символы (✅ текст, • пункт и т.п.) — стандартный List Bullet, эмодзи убираем
+        is_emoji_bullet, bullet, rest = _line_starts_with_emoji_bullet(stripped)
+        if is_emoji_bullet and rest is not None:
+            rest_text = _normalize_task_list_text(_strip_leading_bullet_chars(rest))
             p = doc.add_paragraph(style='List Bullet')
             pf_list = p.paragraph_format
             pf_list.space_before = Pt(0)
             pf_list.space_after = Pt(0)
-            _add_inline_formatted(p, rest)
+            _add_inline_formatted(p, rest_text)
             # Пробуем слить следующую строку как расшифровку в тот же пункт (через перенос строки)
             next_i = i + 1
             if next_i < len(lines):
@@ -574,11 +804,125 @@ def _md_to_docx_content(doc, md_text):
             _add_inline_formatted(last_p, stripped)
             i += 1
             continue
-        # Обычный параграф
-        p = doc.add_paragraph()
-        _add_inline_formatted(p, stripped)
-        i += 1
-        last_type = 'para'
+        # Markdown-таблица: собираем все строки таблицы подряд
+        if _table_row_like(line):
+            table_rows_raw = []
+            j = i
+            while j < len(lines) and _table_row_like(lines[j]):
+                table_rows_raw.append(lines[j])
+                j += 1
+            # Парсим строки в ячейки
+            rows_cells = [_parse_table_row(r) for r in table_rows_raw]
+            # Убираем строки-разделители (|---|---|)
+            data_rows = [cells for cells in rows_cells if not _is_table_separator_row(cells)]
+            if data_rows:
+                num_rows = len(data_rows)
+                num_cols = max(len(cells) for cells in data_rows) if data_rows else 0
+                if num_cols > 0:
+                    table = doc.add_table(rows=num_rows, cols=num_cols)
+                    table.style = 'Table Grid'
+                    # Очищённый текст по ячейкам для расчёта ширины столбцов
+                    cell_texts = []
+                    for ri, cells in enumerate(data_rows):
+                        row_texts = []
+                        for ci, cell_text in enumerate(cells):
+                            if ci < num_cols:
+                                t = _replace_md_images(cell_text).strip()
+                                t = re.sub(r'\*\*([^*]{1,500})\*\*', r'\1', t)
+                                row_texts.append(t)
+                            else:
+                                row_texts.append('')
+                        while len(row_texts) < num_cols:
+                            row_texts.append('')
+                        cell_texts.append(row_texts)
+                    # Ширина столбца по содержимому: чем больше содержимого в столбце, тем шире столбец
+                    pt_per_char = 5.5
+                    col_content_pt = [max(len(cell_texts[ri][ci]) for ri in range(num_rows)) * pt_per_char for ci in range(num_cols)]
+                    col_content_pt = [max(w, 18) for w in col_content_pt]  # минимум ~18 pt на столбец
+                    try:
+                        table.autofit = False
+                        try:
+                            table.allow_autofit = False
+                        except Exception:
+                            pass
+                        content_width_pt = (21 - 2 - 1.5) * (72 / 2.54)  # область контента A4 в pt
+                        total_content_pt = sum(col_content_pt)
+                        # Если не вмещается — распределяем ширину страницы пропорционально содержимому каждого столбца
+                        if total_content_pt > content_width_pt and total_content_pt > 0:
+                            col_widths_pt = [content_width_pt * (w / total_content_pt) for w in col_content_pt]
+                        else:
+                            col_widths_pt = list(col_content_pt)
+                        # Ширину задаём в дюймах (1 pt = 1/72 inch) и для каждой ячейки столбца — иначе Word выравнивает столбцы одинаково
+                        for ci in range(num_cols):
+                            w_inches = col_widths_pt[ci] / 72.0
+                            table.columns[ci].width = Inches(w_inches)
+                            for ri in range(num_rows):
+                                table.rows[ri].cells[ci].width = Inches(w_inches)
+                        table.width = Inches(sum(col_widths_pt) / 72.0)
+                    except Exception:
+                        pass
+                    for ri, row_texts in enumerate(cell_texts):
+                        for ci, t in enumerate(row_texts):
+                            if ci >= num_cols:
+                                continue
+                            cell = table.rows[ri].cells[ci]
+                            para = cell.paragraphs[0]
+                            para.clear()
+                            _add_run_with_emoji_font(para, t, bold=(ri == 0))
+                            for run in para.runs:
+                                run.font.size = Pt(9)
+                            para.alignment = WD_ALIGN_PARAGRAPH.CENTER
+                            try:
+                                cell.vertical_alignment = WD_ALIGN_VERTICAL.TOP
+                            except Exception:
+                                pass
+                    last_type = 'para'
+            i = j
+            continue
+        # Setext-заголовки (CommonMark): строка(и) текста + подчёркивание === (h1) или --- (h2)
+        setext_content = [stripped]
+        j = i + 1
+        found_setext = False
+        while j < len(lines) and lines[j].strip():
+            n = lines[j].strip()
+            if re.match(r'^=+\s*$', n):
+                head_text = ' '.join(setext_content)
+                p_h = doc.add_heading(head_text, level=1)
+                p_h.clear()
+                _add_run_with_emoji_font(p_h, head_text)
+                for run in p_h.runs:
+                    run.font.size = Pt(16)
+                i = j + 1
+                last_type = 'heading'
+                found_setext = True
+                break
+            if re.match(r'^\-+\s*$', n) and len(n) >= 3:
+                head_text = ' '.join(setext_content)
+                p_h = doc.add_heading(head_text, level=2)  # Setext --- → H2
+                p_h.clear()
+                _add_run_with_emoji_font(p_h, head_text)
+                for run in p_h.runs:
+                    run.font.size = Pt(14)
+                i = j + 1
+                last_type = 'heading'
+                found_setext = True
+                break
+            if _get_line_type(n) != 'para':
+                break
+            setext_content.append(n)
+            j += 1
+        if not found_setext:
+            # Обычный параграф (нет setext подчёркивания или прервались на заголовке/списке)
+            p = doc.add_paragraph()
+            _add_inline_formatted(p, stripped)
+            i += 1
+            last_type = 'para'
+        continue
+    elapsed = time.perf_counter() - t0
+    msg = f"md-to-docx: разбор завершён, {n_lines} строк за {elapsed:.2f} с"
+    if _log:
+        _log.info(msg)
+    print(msg, flush=True)
     return doc
 
 # Импорт модулей логирования и отслеживания расходов
@@ -1201,8 +1545,8 @@ def export_to_docx(task_id):
                     pf_list.space_after = Pt(0)
                     p.add_run(text)
                 else:
-                    is_emoji_bullet, rest = _line_starts_with_emoji_bullet(stripped)
-                    if is_emoji_bullet and rest:
+                    is_emoji_bullet, bullet, rest = _line_starts_with_emoji_bullet(stripped)
+                    if is_emoji_bullet and rest is not None:
                         p = doc.add_paragraph(style='List Bullet')
                         pf_list = p.paragraph_format
                         pf_list.space_before = Pt(0)
@@ -1239,6 +1583,7 @@ def export_to_docx(task_id):
 @app.route('/api/convert/md-to-docx', methods=['POST'])
 def convert_md_to_docx():
     """Принимает MD-файл, конвертирует в DOCX и возвращает файл для скачивания."""
+    logger.info("POST /api/convert/md-to-docx: запрос получен")
     if not DOCX_AVAILABLE:
         return jsonify({'error': 'Модуль python-docx не установлен'}), 500
     uploaded = request.files.get('file')
@@ -1248,27 +1593,64 @@ def convert_md_to_docx():
         return jsonify({'error': 'Требуется файл Markdown (.md)'}), 400
     try:
         md_bytes = uploaded.read()
+        logger.info(f"POST /api/convert/md-to-docx: файл прочитан, {len(md_bytes)} байт")
+    except Exception as e:
+        logger.error(f"Ошибка чтения файла MD → DOCX: {e}", exc_info=True)
+        return jsonify({'error': f'Не удалось прочитать файл: {str(e)}'}), 500
+    try:
+        md_text = md_bytes.decode('utf-8')
+    except UnicodeDecodeError:
         try:
-            md_text = md_bytes.decode('utf-8')
-        except UnicodeDecodeError:
             md_text = md_bytes.decode('utf-8-sig')
+        except UnicodeDecodeError:
+            try:
+                md_text = md_bytes.decode('cp1251')
+            except (UnicodeDecodeError, LookupError):
+                return jsonify({
+                    'error': 'Неподдерживаемая кодировка файла. Сохраните файл в UTF-8 и попробуйте снова.'
+                }), 400
+    spacing = None
+    try:
+        raw = request.form.get('spacing')
+        if raw:
+            spacing = json.loads(raw)
+    except (TypeError, ValueError):
+        pass
+
+    def do_convert():
         doc = Document()
-        _md_to_docx_content(doc, md_text)
+        t1 = time.perf_counter()
+        _md_to_docx_content(doc, md_text, spacing=spacing)
+        t2 = time.perf_counter()
         file_stream = io.BytesIO()
         doc.save(file_stream)
+        t3 = time.perf_counter()
         file_stream.seek(0)
+        logger.info(f"md-to-docx: разбор {t2-t1:.2f} с, сохранение DOCX {t3-t2:.2f} с, всего {t3-t1:.2f} с")
+        return file_stream.getvalue()
+
+    try:
+        logger.info("POST /api/convert/md-to-docx: начало конвертации в DOCX")
+        if os.environ.get('MD_DOCX_SYNC') == '1':
+            # Синхронный режим: прогресс виден в терминале (print), для отладки
+            docx_bytes = do_convert()
+        else:
+            future = _executor_md_docx.submit(do_convert)
+            docx_bytes = future.result(timeout=MD_DOCX_TIMEOUT)
+        logger.info(f"POST /api/convert/md-to-docx: готово, отправка {len(docx_bytes)} байт")
         base_name = Path(uploaded.filename).stem
         safe_name = "".join(c for c in base_name if c.isalnum() or c in (' ', '-', '_')).rstrip() or 'document'
         download_name = f"{safe_name}_{datetime.now().strftime('%Y%m%d')}.docx"
-        return send_file(
-            file_stream,
-            mimetype='application/vnd.openxmlformats-officedocument.wordprocessingml.document',
-            as_attachment=True,
-            download_name=download_name,
-        )
+        resp = Response(docx_bytes, status=200, mimetype='application/vnd.openxmlformats-officedocument.wordprocessingml.document')
+        resp.headers['Content-Disposition'] = f'attachment; filename="{download_name}"'
+        resp.headers['Content-Length'] = str(len(docx_bytes))
+        return resp
+    except FuturesTimeoutError:
+        logger.error("POST /api/convert/md-to-docx: таймаут конвертации")
+        return jsonify({'error': f'Конвертация заняла больше {MD_DOCX_TIMEOUT} с. Упростите файл или разбейте его.'}), 503
     except Exception as e:
         logger.error(f"Ошибка конвертации MD → DOCX: {e}", exc_info=True)
-        return jsonify({'error': f'Ошибка конвертации: {str(e)}'}), 500
+        return jsonify({'error': f'Ошибка конвертации: {str(e)}. Попробуйте другой файл или упростите разметку.'}), 500
 
 
 if __name__ == '__main__':
@@ -1287,6 +1669,7 @@ if __name__ == '__main__':
             print_red("\n" + "=" * 60)
             print_red("Завершение работы приложения...")
             print_red("=" * 60)
+            print("(Сообщение «Exception in thread» при остановке — нормально, можно игнорировать)")
             remove_pid_file()
             sys.exit(0)
         
@@ -1392,10 +1775,18 @@ if __name__ == '__main__':
     print_green("Нажмите Ctrl+C для остановки")
     print_green("=" * 60)
     
-    # Flask reloader в debug режиме запускает приложение дважды:
-    # 1. Основной процесс (parent) - только для мониторинга изменений
-    # 2. Дочерний процесс (child) - рабочий сервер
-    # Используем use_reloader=False, чтобы избежать двойного запуска
-    # или проверяем WERKZEUG_RUN_MAIN для создания агентов только в дочернем процессе
-    app.run(debug=FLASK_DEBUG, host=FLASK_HOST, port=FLASK_PORT, use_reloader=True)
+    # Обработчик Ctrl+C: KeyboardInterrupt — стандартный выход, atexit удалит PID
+    def _shutdown_handler(signum, frame):
+        print_red("\nЗавершение работы приложения...")
+        remove_pid_file()
+        raise KeyboardInterrupt()
+    try:
+        signal.signal(signal.SIGINT, _shutdown_handler)
+        signal.signal(signal.SIGTERM, _shutdown_handler)
+    except (ValueError, OSError):
+        pass
+    
+    # На Windows с reloader Ctrl+C часто не доходит до рабочего процесса — отключаем reloader по умолчанию
+    use_reloader = FLASK_DEBUG and (platform.system() != 'Windows' or os.environ.get('FLASK_USE_RELOADER') == '1')
+    app.run(debug=FLASK_DEBUG, host=FLASK_HOST, port=FLASK_PORT, use_reloader=use_reloader, threaded=True)
 

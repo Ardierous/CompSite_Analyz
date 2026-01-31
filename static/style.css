@@ -342,6 +342,55 @@ body {
     cursor: not-allowed;
 }
 
+.tool-modal-error {
+    margin-bottom: 16px;
+    padding: 12px 14px;
+    background: rgba(220, 53, 69, 0.12);
+    border: 1px solid rgba(220, 53, 69, 0.4);
+    border-radius: 8px;
+    color: var(--text-primary);
+    font-size: 0.9rem;
+}
+
+.md-docx-spacing {
+    margin-bottom: 16px;
+    padding: 12px 0;
+}
+
+.md-docx-spacing-title {
+    font-size: 0.9rem;
+    color: var(--text-secondary);
+    margin-bottom: 8px;
+}
+
+.md-docx-spacing-table {
+    width: 100%;
+    border-collapse: collapse;
+    font-size: 0.9rem;
+}
+
+.md-docx-spacing-table th,
+.md-docx-spacing-table td {
+    padding: 4px 8px;
+    text-align: left;
+}
+
+.md-docx-spacing-table th {
+    color: var(--text-secondary);
+    font-weight: 500;
+}
+
+.md-docx-spacing-table input[type="number"] {
+    width: 100%;
+    max-width: 64px;
+    padding: 4px 8px;
+    background: var(--bg-color);
+    border: 1px solid var(--border-color);
+    border-radius: 6px;
+    color: var(--text-primary);
+    font-size: 0.9rem;
+}
+
 .tools-close-btn {
     padding: 8px 16px;
     font-size: 0.9rem;

@@ -23,6 +23,7 @@ const backToInstrumentsBtn = document.getElementById('backToInstrumentsBtn');
 const toolModalOverlay = document.getElementById('toolModalOverlay');
 const toolModalCloseBtn = document.getElementById('toolModalCloseBtn');
 const toolModalMdToDocxBtn = document.getElementById('toolModalMdToDocxBtn');
+const toolModalError = document.getElementById('toolModalError');
 const mdFileInput = document.getElementById('mdFileInput');
 const entryBtn = document.getElementById('entryBtn');
 const loginModalOverlay = document.getElementById('loginModalOverlay');
@@ -367,6 +368,10 @@ if (btnMdToDocx && toolModalOverlay) {
     btnMdToDocx.addEventListener('click', () => {
         toolModalOverlay.style.display = 'flex';
         toolModalOverlay.setAttribute('aria-hidden', 'false');
+        if (toolModalError) {
+            toolModalError.style.display = 'none';
+            toolModalError.textContent = '';
+        }
     });
 }
 
@@ -546,59 +551,112 @@ if (toolModalMdToDocxBtn && mdFileInput) {
         mdFileInput.click();
     });
 }
+// Показать ошибку в модалке MD→DOCX (модалка остаётся открытой для повторной попытки)
+function showToolModalError(message) {
+    if (toolModalError) {
+        toolModalError.textContent = message;
+        toolModalError.style.display = 'block';
+    } else {
+        showError(message);
+    }
+}
+
+function hideToolModalError() {
+    if (toolModalError) {
+        toolModalError.style.display = 'none';
+        toolModalError.textContent = '';
+    }
+}
+
 // После выбора .md — отправка на сервер и скачивание DOCX
 if (mdFileInput) {
     mdFileInput.addEventListener('change', async () => {
         const file = mdFileInput.files[0];
         if (!file) return;
         const btn = toolModalMdToDocxBtn;
+        hideToolModalError();
         if (btn) btn.disabled = true;
         try {
             const formData = new FormData();
             formData.append('file', file);
+            const spacing = {
+                normal: { before: parseInt(document.getElementById('mdDocxNormalBefore')?.value || 0, 10) || 0, after: parseInt(document.getElementById('mdDocxNormalAfter')?.value || 0, 10) || 0 },
+                heading1: { before: parseInt(document.getElementById('mdDocxH1Before')?.value || 12, 10) || 0, after: parseInt(document.getElementById('mdDocxH1After')?.value || 6, 10) || 0 },
+                heading2: { before: parseInt(document.getElementById('mdDocxH2Before')?.value || 10, 10) || 0, after: parseInt(document.getElementById('mdDocxH2After')?.value || 4, 10) || 0 },
+                heading3: { before: parseInt(document.getElementById('mdDocxH3Before')?.value || 8, 10) || 0, after: parseInt(document.getElementById('mdDocxH3After')?.value || 4, 10) || 0 },
+                heading4: { before: parseInt(document.getElementById('mdDocxH4Before')?.value || 6, 10) || 0, after: parseInt(document.getElementById('mdDocxH4After')?.value || 2, 10) || 0 },
+            };
+            formData.append('spacing', JSON.stringify(spacing));
             const response = await fetch('/api/convert/md-to-docx', {
                 method: 'POST',
                 body: formData,
             });
-            const contentType = response.headers.get('content-type');
+            const contentType = response.headers.get('content-type') || '';
             if (!response.ok) {
-                if (toolModalOverlay) {
-                    toolModalOverlay.style.display = 'none';
-                    toolModalOverlay.setAttribute('aria-hidden', 'true');
+                let msg = `Ошибка ${response.status}: ${response.statusText}`;
+                if (contentType.includes('application/json')) {
+                    try {
+                        const err = await response.json();
+                        msg = err.error || msg;
+                    } catch (_) {}
                 }
-                if (contentType && contentType.includes('application/json')) {
-                    const err = await response.json();
-                    showError(err.error || 'Ошибка конвертации');
-                } else {
-                    showError(`Ошибка ${response.status}: ${response.statusText}`);
+                showToolModalError(msg + ' Выберите файл снова или другой файл.');
+                return;
+            }
+            // Ответ 200 с JSON — значит сервер вернул ошибку в теле
+            if (contentType.includes('application/json')) {
+                try {
+                    const data = await response.json();
+                    showToolModalError((data.error || 'Ошибка конвертации') + ' Выберите файл снова.');
+                } catch (_) {
+                    showToolModalError('Неожиданный ответ сервера. Выберите файл снова.');
                 }
                 return;
             }
             const blob = await response.blob();
-            const url = window.URL.createObjectURL(blob);
-            const a = document.createElement('a');
-            a.href = url;
+            if (!blob || blob.size === 0) {
+                showToolModalError('Сервер вернул пустой файл. Попробуйте другой файл или проверьте сервер.');
+                return;
+            }
             const name = response.headers.get('content-disposition');
             let filename = (file.name || 'document').replace(/\.md$/i, '') + '_converted.docx';
             if (name && name.includes('filename=')) {
-                const m = name.match(/filename\*?=['"]?(?:UTF-8'')?([^'";\n]+)/i) || name.match(/filename=['"]?([^'";\n]+)/);
-                if (m) filename = m[1].trim();
+                const m = name.match(/filename\*?=(?:UTF-8'')?([^'";\n]+)/i) || name.match(/filename=['"]?([^'";\n]+)/);
+                if (m) {
+                    try {
+                        filename = decodeURIComponent(m[1].trim().replace(/^"(.*)"$/, '$1'));
+                    } catch (_) {
+                        filename = m[1].trim();
+                    }
+                }
             }
+            const url = window.URL.createObjectURL(blob);
+            const a = document.createElement('a');
+            a.href = url;
             a.download = filename;
+            a.style.display = 'none';
             document.body.appendChild(a);
-            a.click();
-            window.URL.revokeObjectURL(url);
-            document.body.removeChild(a);
-            if (toolModalOverlay) {
-                toolModalOverlay.style.display = 'none';
-                toolModalOverlay.setAttribute('aria-hidden', 'true');
-            }
+            requestAnimationFrame(() => {
+                a.click();
+                setTimeout(() => {
+                    window.URL.revokeObjectURL(url);
+                    if (a.parentNode) document.body.removeChild(a);
+                }, 300);
+            });
+            hideToolModalError();
+            toolModalOverlay.style.display = 'none';
+            toolModalOverlay.setAttribute('aria-hidden', 'true');
         } catch (e) {
-            if (toolModalOverlay) {
-                toolModalOverlay.style.display = 'none';
-                toolModalOverlay.setAttribute('aria-hidden', 'true');
+            const raw = (e.message || String(e)).trim();
+            let msg;
+            if (raw === 'Failed to fetch' || raw.toLowerCase().includes('failed to fetch')) {
+                msg = 'Не удалось связаться с сервером. Проверьте: 1) приложение запущено (python main.py); 2) страница открыта по адресу сервера (например http://localhost:5000), а не как файл; 3) файл не слишком большой. Затем выберите файл снова.';
+            } else if (raw.toLowerCase().includes('network') || raw.toLowerCase().includes('load')) {
+                msg = 'Ошибка сети или сервер не отвечает. Убедитесь, что приложение запущено и откройте страницу по адресу сервера (например http://localhost:5000). Выберите файл снова.';
+            } else {
+                msg = 'Ошибка при конвертации: ' + raw + ' Выберите файл снова или проверьте соединение.';
             }
-            showError('Ошибка при конвертации: ' + (e.message || String(e)));
+            showToolModalError(msg);
         } finally {
             mdFileInput.value = '';
             if (btn) btn.disabled = false;
