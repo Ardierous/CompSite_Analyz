@@ -3,7 +3,7 @@ from flask_cors import CORS
 import os
 import threading
 from datetime import datetime
-from urllib.parse import urlparse
+from urllib.parse import urlparse, quote
 import warnings
 import io
 import requests
@@ -18,6 +18,7 @@ import signal
 import unicodedata
 from concurrent.futures import ThreadPoolExecutor, TimeoutError as FuturesTimeoutError
 import time
+import tempfile
 warnings.filterwarnings('ignore')
 
 _executor_md_docx = ThreadPoolExecutor(max_workers=2, thread_name_prefix='md2docx')
@@ -346,9 +347,15 @@ try:
     from docx.shared import Pt, RGBColor, Inches, Cm
     from docx.enum.text import WD_ALIGN_PARAGRAPH
     from docx.enum.table import WD_ALIGN_VERTICAL
+    from docx.oxml import OxmlElement
+    from docx.oxml.ns import qn
+    from docx.opc.constants import RELATIONSHIP_TYPE
+    from docx.text.run import Run
     DOCX_AVAILABLE = True
 except ImportError:
     DOCX_AVAILABLE = False
+    RELATIONSHIP_TYPE = None
+    Run = None
 
 import re
 
@@ -407,40 +414,80 @@ def _line_starts_with_emoji_bullet(stripped):
 
 
 def _is_emoji_char(c):
-    """Проверка, что символ — эмодзи (для выбора шрифта Segoe UI Emoji)."""
+    """Проверка, что символ — эмодзи/декоративный (удаляем из вывода)."""
     if len(c) != 1:
         return False
+    if c in _BULLET_CHARS:
+        return True
     o = ord(c)
     if 0x1F300 <= o <= 0x1F9FF or 0x2600 <= o <= 0x26FF or 0x2700 <= o <= 0x27BF:
+        return True
+    if 0x2300 <= o <= 0x23FF or 0x2B00 <= o <= 0x2BFF:
+        return True
+    if 0x25A0 <= o <= 0x25FF:
+        return True
+    if 0x2022 <= o <= 0x2023:
+        return True
+    if o in (0xFE0F, 0xFE0E):
+        return True
+    if o >= 0x1F000:
         return True
     return unicodedata.category(c) == 'So'
 
 
+def _strip_emoji(text):
+    """Удаляет эмодзи и символы категории So из текста. Убирает лишний пробел после удалённого эмодзи."""
+    if not text:
+        return text
+    return ''.join(c for c in text if not _is_emoji_char(c)).lstrip()
+
+
 def _add_run_with_emoji_font(paragraph, text, bold=False, italic=False, strike=False, font_name=None):
-    """Добавляет текст в параграф, разбивая по эмодзи: сегменты с эмодзи — Segoe UI Emoji, остальное — Segoe UI (или font_name)."""
+    """Добавляет текст в параграф. Эмодзи удаляются."""
+    if not text:
+        return
+    text = _strip_emoji(text)
     if not text:
         return
     base_font = font_name or 'Segoe UI'
-    segments = []
-    current, is_emoji_cur = [], None
-    for c in text:
-        is_e = _is_emoji_char(c)
-        if is_emoji_cur is None:
-            is_emoji_cur = is_e
-        if is_e == is_emoji_cur:
-            current.append(c)
-        else:
-            if current:
-                segments.append((is_emoji_cur, ''.join(current)))
-            current, is_emoji_cur = [c], is_e
-    if current:
-        segments.append((is_emoji_cur, ''.join(current)))
-    for is_emoji, seg in segments:
-        run = paragraph.add_run(seg)
-        run.font.name = 'Segoe UI Emoji' if is_emoji else base_font
-        run.bold = bold
-        run.italic = italic
-        run.font.strike = strike
+    run = paragraph.add_run(text)
+    run.font.name = base_font
+    run.bold = bold
+    run.italic = italic
+    run.font.strike = strike
+
+
+def _normalize_url(url):
+    """Добавляет https:// для URL без схемы (www.example.com → https://www.example.com)."""
+    if not url or not url.strip():
+        return url
+    u = url.strip()
+    if not u.startswith(('http://', 'https://', 'mailto:', '#')) and u.startswith('www.'):
+        return 'https://' + u
+    return u
+
+
+def _add_hyperlink(paragraph, text, url):
+    """Добавляет кликабельную гиперссылку. Только текст (без URL), чёрный цвет + подчёркивание — видно при печати."""
+    if not DOCX_AVAILABLE or not text or not url or Run is None:
+        _add_run_with_emoji_font(paragraph, text or '')
+        return
+    try:
+        url = _normalize_url(url)
+        part = paragraph.part
+        r_id = part.relate_to(url, RELATIONSHIP_TYPE.HYPERLINK, is_external=True)
+        hyperlink = OxmlElement('w:hyperlink')
+        hyperlink.set(qn('r:id'), r_id)
+        r_elem = OxmlElement('w:r')
+        new_run = Run(r_elem, paragraph)
+        new_run.text = text
+        new_run.font.name = 'Segoe UI'
+        new_run.font.color.rgb = RGBColor(0, 0, 0)
+        new_run.font.underline = True
+        hyperlink.append(new_run._element)
+        paragraph._p.append(hyperlink)
+    except Exception:
+        _add_run_with_emoji_font(paragraph, text)
 
 
 # ASCII-символы, экранируемые обратным слэшем в CommonMark
@@ -449,9 +496,18 @@ _ESCAPABLE = set(r'!"#$%&\'()*+,\-./:;<=>?@[\]^_`{|}~')
 _RE_INLINE = re.compile(
     r'(\*\*\*[^*]{1,300}\*\*\*|___[^_]{1,300}___|\*\*[^*]{1,300}\*\*|__[^_]{1,300}__|'
     r'\*[^*]{1,300}\*|_[^_]{1,300}_|`[^`]{1,200}`|~~[^~]{1,200}~~|'
-    r'\[[^\]]{1,200}\]\([^)]{1,1500}\)|[^*`~\[]+)'
+    r'\[\^[^\]]+\]|\[[^\]]{1,200}\]\([^)]{1,1500}\)|[^*`~\[]+)'
 )
 _RE_LINK = re.compile(r'\[([^\]]+)\]\(([^)]+)\)')
+_RE_FOOTNOTE_REF = re.compile(r'\[\^([^\]]+)\]')
+_RE_FOOTNOTE_DEF = re.compile(r'^\[\^([^\]]+)\]:\s*(.*)$')
+
+
+def _text_for_width_calc(text):
+    """Текст для расчёта ширины: [текст](url) → текст (отображаемая длина ссылки)."""
+    if not text:
+        return text
+    return re.sub(r'\[([^\]]+)\]\([^)]+\)', r'\1', text)
 
 
 def _apply_backslash_escapes(text):
@@ -474,8 +530,8 @@ def _apply_backslash_escapes(text):
     return ''.join(result)
 
 
-def _add_inline_formatted(paragraph, text):
-    """Добавляет в параграф текст с поддержкой **/__ жирный, */_ курсив, `код`, ~~зачёркнутый~~, [текст](url); экранирование \\; картинки → подпись."""
+def _add_inline_formatted(paragraph, text, footnote_ctx=None):
+    """Добавляет в параграф текст с поддержкой **/__ жирный, */_ курсив, `код`, ~~зачёркнутый~~, [текст](url), [^id] сноски; экранирование \\; картинки → подпись."""
     text = _replace_md_images(text)
     text = _apply_backslash_escapes(text)
     # Быстрый путь: нет спецсимволов — один add_run без regex (с разбивкой по эмодзи)
@@ -490,7 +546,7 @@ def _add_inline_formatted(paragraph, text):
     _max_inline = 3000
     if len(text) > _max_inline:
         head, tail = text[: _max_inline], text[_max_inline:]
-        _add_inline_formatted(paragraph, head)
+        _add_inline_formatted(paragraph, head, footnote_ctx)
         _add_run_with_emoji_font(paragraph, tail)
         return
     parts = _RE_INLINE.findall(text)
@@ -499,25 +555,45 @@ def _add_inline_formatted(paragraph, text):
         return
     for part in parts:
         if part.startswith('***') and part.endswith('***'):
-            _add_run_with_emoji_font(paragraph, part[3:-3] + ' ', bold=True, italic=True)
+            _add_run_with_emoji_font(paragraph, part[3:-3], bold=True, italic=True)
         elif part.startswith('___') and part.endswith('___'):
-            _add_run_with_emoji_font(paragraph, part[3:-3] + ' ', bold=True, italic=True)
+            _add_run_with_emoji_font(paragraph, part[3:-3], bold=True, italic=True)
         elif part.startswith('**') and part.endswith('**'):
-            _add_run_with_emoji_font(paragraph, part[2:-2] + ' ', bold=True)
+            _add_run_with_emoji_font(paragraph, part[2:-2], bold=True)
         elif part.startswith('__') and part.endswith('__'):
-            _add_run_with_emoji_font(paragraph, part[2:-2] + ' ', bold=True)
+            _add_run_with_emoji_font(paragraph, part[2:-2], bold=True)
         elif part.startswith('*') and part.endswith('*') and len(part) > 1:
-            _add_run_with_emoji_font(paragraph, part[1:-1] + ' ', italic=True)
+            _add_run_with_emoji_font(paragraph, part[1:-1], italic=True)
         elif part.startswith('_') and part.endswith('_') and len(part) > 1:
-            _add_run_with_emoji_font(paragraph, part[1:-1] + ' ', italic=True)
+            _add_run_with_emoji_font(paragraph, part[1:-1], italic=True)
         elif part.startswith('`') and part.endswith('`'):
-            _add_run_with_emoji_font(paragraph, part[1:-1] + ' ', font_name='Consolas')
+            _add_run_with_emoji_font(paragraph, part[1:-1], font_name='Consolas')
         elif part.startswith('~~') and part.endswith('~~'):
-            _add_run_with_emoji_font(paragraph, part[2:-2] + ' ', strike=True)
+            _add_run_with_emoji_font(paragraph, part[2:-2], strike=True)
+        elif part.startswith('[^') and part.endswith(']'):
+            m = _RE_FOOTNOTE_REF.match(part)
+            if m and footnote_ctx:
+                fn_id = m.group(1)
+                entries = footnote_ctx['entries']
+                defs = footnote_ctx['defs']
+                if fn_id not in footnote_ctx['id_to_num']:
+                    footnote_ctx['id_to_num'][fn_id] = len(entries) + 1
+                    entries.append((fn_id, defs.get(fn_id, '')))
+                num = footnote_ctx['id_to_num'][fn_id]
+                run = paragraph.add_run(f' [{num}]')
+                run.font.name = 'Segoe UI'
+                run.font.size = Pt(10)
+                run.font.superscript = True
+            else:
+                _add_run_with_emoji_font(paragraph, part)
         elif part.startswith('[') and '](' in part:
             m = _RE_LINK.match(part)
             if m:
-                _add_run_with_emoji_font(paragraph, m.group(1) + ' (' + m.group(2) + ') ')
+                link_text = _strip_emoji(m.group(1))
+                if link_text:
+                    _add_hyperlink(paragraph, link_text, m.group(2))
+                else:
+                    _add_run_with_emoji_font(paragraph, m.group(2))
             else:
                 _add_run_with_emoji_font(paragraph, part)
         else:
@@ -525,14 +601,14 @@ def _add_inline_formatted(paragraph, text):
 
 
 def _normalize_task_list_text(text):
-    """Если текст начинается с [ ], [x] или [X], заменяет на ☐/☑ и возвращает обновлённый текст."""
+    """Если текст начинается с [ ], [x] или [X], заменяет на [x]/[ ] (эмодзи убраны)."""
     if not text:
         return text
     m = re.match(r'^\[([ xX])\]\s*', text.strip())
     if m:
         checked = m.group(1).lower() == 'x'
         rest = text.strip()[len(m.group(0)):]
-        return ('☑ ' if checked else '☐ ') + rest
+        return ('[x] ' if checked else '[ ] ') + rest
     return text
 
 
@@ -567,24 +643,103 @@ def _is_table_separator_row(cells):
     return all(re.match(r'^:?-+:?$', c.strip()) for c in cells)
 
 
+def _parse_col_alignment_from_separator(cell):
+    """Парсит выравнивание из ячейки разделителя: :--- = left, :---: = center, ---: = right."""
+    c = cell.strip()
+    if c.startswith(':') and c.endswith(':'):
+        return WD_ALIGN_PARAGRAPH.CENTER
+    if c.endswith(':'):
+        return WD_ALIGN_PARAGRAPH.RIGHT
+    return WD_ALIGN_PARAGRAPH.LEFT
+
+
 def _table_row_like(line):
     """Проверяет, похожа ли строка на строку таблицы (начинается с | и есть ещё |)."""
     s = line.strip()
     return len(s) >= 2 and s.startswith('|') and s.count('|') >= 2
 
 
-def _md_to_docx_content(doc, md_text, spacing=None):
-    """Заполняет документ python-docx контентом из Markdown. spacing — опциональный dict с отступами (пт) для Normal и Heading 1–4."""
+def _set_cell_shading(cell, fill_hex):
+    """Заливка ячейки цветом (hex без #, например D6EBFF)."""
+    if not DOCX_AVAILABLE:
+        return
+    try:
+        tc = cell._tc
+        tcPr = tc.get_or_add_tcPr()
+        shading = OxmlElement('w:shd')
+        shading.set(qn('w:fill'), fill_hex)
+        tcPr.append(shading)
+    except Exception:
+        pass
+
+
+def _set_cell_no_wrap(cell):
+    """Запрет переноса строки в ячейке."""
+    if not DOCX_AVAILABLE:
+        return
+    try:
+        tc = cell._tc
+        if not tc.xpath(".//w:noWrap"):
+            tcPr = tc.get_or_add_tcPr()
+            noWrap = OxmlElement('w:noWrap')
+            tcPr.append(noWrap)
+    except Exception:
+        pass
+
+
+def _set_cell_margins(cell, top=90, start=90, bottom=90, end=90):
+    """Отступы ячейки в dxa (1 pt = 20 dxa). 90 dxa ≈ 4.5 pt."""
+    if not DOCX_AVAILABLE:
+        return
+    try:
+        tc = cell._tc
+        tcPr = tc.get_or_add_tcPr()
+        for old in list(tcPr.xpath(".//w:tcMar")):
+            old.getparent().remove(old)
+        tcMar = OxmlElement('w:tcMar')
+        for name, val in [('top', top), ('start', start), ('bottom', bottom), ('end', end)]:
+            node = OxmlElement(f'w:{name}')
+            node.set(qn('w:w'), str(val))
+            node.set(qn('w:type'), 'dxa')
+            tcMar.append(node)
+        tcPr.append(tcMar)
+    except Exception:
+        pass
+
+
+def _set_table_header_repeat(table):
+    """Повтор первой строки таблицы на каждой странице."""
+    if not DOCX_AVAILABLE:
+        return
+    try:
+        first_row = table.rows[0]._tr
+        trPr = first_row.get_or_add_trPr()
+        if not trPr.xpath(".//w:tblHeader"):
+            trPr.append(OxmlElement('w:tblHeader'))
+    except Exception:
+        pass
+
+
+def _md_to_docx_content(doc, md_text, spacing=None, options=None):
+    """Заполняет документ python-docx контентом из Markdown. spacing — отступы (пт). options — line_spacing, table_font_size, alternating_rows, list_marker."""
     t0 = time.perf_counter()
-    # Значения по умолчанию для отступов (пт)
     def_pt = lambda d, key, subkey: (d or {}).get(key, {}).get(subkey, 0)
     if spacing is None:
         spacing = {}
-    # Иерархия кегля: обычный текст меньше любого заголовка, каждый уровень заголовка меньше предыдущего
+    opts = options or {}
+    line_spacing = opts.get('line_spacing', 1.15)
+    table_font_size = opts.get('table_font_size', 9)
+    main_font_size = opts.get('main_font_size', 11)
+    alternating_rows = opts.get('alternating_rows', True)
+    use_hyphen_marker = (opts.get('list_marker', 'default') == 'hyphen')
+    main_pt = max(8, min(24, int(main_font_size) if main_font_size else 11))
+    # Иерархия кегля: обычный текст меньше любого заголовка
     doc.styles['Normal'].font.name = 'Segoe UI'
-    doc.styles['Normal'].font.size = Pt(11)
+    doc.styles['Normal'].font.size = Pt(main_pt)
     doc.styles['Normal'].paragraph_format.space_before = Pt(def_pt(spacing, 'normal', 'before'))
     doc.styles['Normal'].paragraph_format.space_after = Pt(def_pt(spacing, 'normal', 'after'))
+    doc.styles['Normal'].paragraph_format.alignment = WD_ALIGN_PARAGRAPH.JUSTIFY
+    doc.styles['Normal'].paragraph_format.line_spacing = line_spacing
     for level, size_pt in [(1, 16), (2, 14), (3, 13), (4, 12)]:
         try:
             h_style = doc.styles[f'Heading {level}']
@@ -604,6 +759,17 @@ def _md_to_docx_content(doc, md_text, spacing=None):
     except Exception:
         pass
     lines = md_text.replace('\r\n', '\n').replace('\r', '\n').split('\n')
+    # Собираем определения сносок [^id]: text и удаляем их из документа
+    footnote_defs = {}
+    lines_no_fndefs = []
+    for line in lines:
+        m = _RE_FOOTNOTE_DEF.match(line.strip())
+        if m:
+            footnote_defs[m.group(1)] = m.group(2).strip()
+        else:
+            lines_no_fndefs.append(line)
+    lines = lines_no_fndefs
+    footnote_ctx = {'defs': footnote_defs, 'entries': [], 'id_to_num': {}}
     n_lines = len(lines)
     i = 0
     in_fence = False
@@ -665,8 +831,8 @@ def _md_to_docx_content(doc, md_text, spacing=None):
         # Горизонтальная линия (thematic break): только один тип символа, 3+ шт. (CommonMark)
         if re.match(r'^(\*{3,}|_{3,}|-{3,})\s*$', stripped):
             p_hr = doc.add_paragraph()
-            p_hr.paragraph_format.space_before = Pt(3)
-            p_hr.paragraph_format.space_after = Pt(3)
+            p_hr.paragraph_format.space_before = Pt(6)
+            p_hr.paragraph_format.space_after = Pt(6)
             try:
                 p_hr.paragraph_format.border_bottom.width = Pt(0.5)
                 p_hr.paragraph_format.border_bottom.color = RGBColor(0xC0, 0xC0, 0xC0)
@@ -691,7 +857,7 @@ def _md_to_docx_content(doc, md_text, spacing=None):
             for idx, qline in enumerate(quote_lines):
                 if idx > 0:
                     p_q.add_run().add_break()
-                _add_inline_formatted(p_q, qline)
+                _add_inline_formatted(p_q, qline, footnote_ctx)
             for run in p_q.runs:
                 run.italic = True
             i = j
@@ -714,14 +880,14 @@ def _md_to_docx_content(doc, md_text, spacing=None):
             i = j
             last_type = 'code'
             continue
-        # Заголовки # ## ### — только 2 уровня: # и ## → H1, ### и глубже → H2 (эмодзи через Segoe UI Emoji)
+        # Заголовки # ## ### — с поддержкой bold, ссылок и т.д.
         m = re.match(r'^(#{1,6})\s+(.+)$', stripped)
         if m:
             level = 1 if len(m.group(1)) <= 2 else 2
             head_text = m.group(2).strip()
             p_h = doc.add_heading(head_text, level=level)
             p_h.clear()
-            _add_run_with_emoji_font(p_h, head_text)
+            _add_inline_formatted(p_h, head_text, footnote_ctx)
             for run in p_h.runs:
                 run.font.size = Pt([16, 14, 13, 12][min(level, 4) - 1])
             i += 1
@@ -733,8 +899,8 @@ def _md_to_docx_content(doc, md_text, spacing=None):
             p = doc.add_paragraph(style='List Number')
             pf_list = p.paragraph_format
             pf_list.space_before = Pt(0)
-            pf_list.space_after = Pt(0)
-            _add_inline_formatted(p, text)
+            pf_list.space_after = Pt(3)
+            _add_inline_formatted(p, text, footnote_ctx)
             # Пробуем слить следующую строку как расшифровку в тот же пункт (через перенос строки)
             next_i = i + 1
             if next_i < len(lines):
@@ -743,21 +909,36 @@ def _md_to_docx_content(doc, md_text, spacing=None):
                 if next_stripped and _get_line_type(next_stripped) == 'para':
                     run_br = p.add_run()
                     run_br.add_break()
-                    _add_inline_formatted(p, next_stripped)
+                    _add_inline_formatted(p, next_stripped, footnote_ctx)
                     i = next_i + 1
                     last_type = 'list'
                     continue
             i += 1
             last_type = 'list'
             continue
-        # Маркированный список -, * или + (CommonMark)
+        # Маркированный список -, * или + (CommonMark). Строки, оканчивающиеся на : — заголовки, не список (кроме подсписков и соседних пунктов)
         if re.match(r'^[-*+]\s+', stripped) or re.match(r'^\s{0,3}[-*+]\s+', line):
             text = _normalize_task_list_text(_strip_leading_bullet_chars(re.sub(r'^\s*[-*+]\s+', '', stripped)))
-            p = doc.add_paragraph(style='List Bullet')
+            curr_indent = len(line) - len(line.lstrip())
+            next_line = lines[i + 1] if i + 1 < len(lines) else ''
+            next_indent = len(next_line) - len(next_line.lstrip()) if next_line else -1
+            next_is_sublist = (i + 1 < len(lines) and next_indent > curr_indent and re.match(r'^\s+[-*+]\s+', next_line))
+            next_is_sibling_list = (i + 1 < len(lines) and next_indent == curr_indent and _get_line_type((next_line or '').strip()) == 'list')
+            if text.endswith(':') and not next_is_sublist and not next_is_sibling_list:
+                p = doc.add_paragraph()
+                _add_inline_formatted(p, text, footnote_ctx)
+                i += 1
+                last_type = 'para'
+                continue
+            p = doc.add_paragraph(style='List Bullet' if not use_hyphen_marker else None)
+            if use_hyphen_marker:
+                run_marker = p.add_run('- ')
+                run_marker.font.name = 'Segoe UI'
+                run_marker.font.size = Pt(11)
             pf_list = p.paragraph_format
             pf_list.space_before = Pt(0)
-            pf_list.space_after = Pt(0)
-            _add_inline_formatted(p, text)
+            pf_list.space_after = Pt(3)
+            _add_inline_formatted(p, text, footnote_ctx)
             # Пробуем слить следующую строку как расшифровку в тот же пункт (через перенос строки)
             next_i = i + 1
             if next_i < len(lines):
@@ -766,22 +947,37 @@ def _md_to_docx_content(doc, md_text, spacing=None):
                 if next_stripped and _get_line_type(next_stripped) == 'para':
                     run_br = p.add_run()
                     run_br.add_break()
-                    _add_inline_formatted(p, next_stripped)
+                    _add_inline_formatted(p, next_stripped, footnote_ctx)
                     i = next_i + 1
                     last_type = 'list'
                     continue
             i += 1
             last_type = 'list'
             continue
-        # Буллеты-эмодзи/символы (✅ текст, • пункт и т.п.) — стандартный List Bullet, эмодзи убираем
+        # Буллеты-эмодзи/символы (✅ текст, • пункт и т.п.) — маркер по настройке
         is_emoji_bullet, bullet, rest = _line_starts_with_emoji_bullet(stripped)
         if is_emoji_bullet and rest is not None:
             rest_text = _normalize_task_list_text(_strip_leading_bullet_chars(rest))
-            p = doc.add_paragraph(style='List Bullet')
+            curr_indent_e = len(line) - len(line.lstrip())
+            next_line_e = lines[i + 1] if i + 1 < len(lines) else ''
+            next_indent_e = len(next_line_e) - len(next_line_e.lstrip()) if next_line_e else -1
+            next_is_sublist = (i + 1 < len(lines) and next_indent_e > curr_indent_e and re.match(r'^\s+[-*+]\s+', next_line_e))
+            next_is_sibling_list = (i + 1 < len(lines) and next_indent_e == curr_indent_e and _get_line_type((next_line_e or '').strip()) == 'list')
+            if rest_text.endswith(':') and not next_is_sublist and not next_is_sibling_list:
+                p = doc.add_paragraph()
+                _add_inline_formatted(p, rest_text, footnote_ctx)
+                i += 1
+                last_type = 'para'
+                continue
+            p = doc.add_paragraph(style='List Bullet' if not use_hyphen_marker else None)
+            if use_hyphen_marker:
+                run_marker = p.add_run('- ')
+                run_marker.font.name = 'Segoe UI'
+                run_marker.font.size = Pt(11)
             pf_list = p.paragraph_format
             pf_list.space_before = Pt(0)
-            pf_list.space_after = Pt(0)
-            _add_inline_formatted(p, rest_text)
+            pf_list.space_after = Pt(3)
+            _add_inline_formatted(p, rest_text, footnote_ctx)
             # Пробуем слить следующую строку как расшифровку в тот же пункт (через перенос строки)
             next_i = i + 1
             if next_i < len(lines):
@@ -790,7 +986,7 @@ def _md_to_docx_content(doc, md_text, spacing=None):
                 if next_stripped and _get_line_type(next_stripped) == 'para':
                     run_br = p.add_run()
                     run_br.add_break()
-                    _add_inline_formatted(p, next_stripped)
+                    _add_inline_formatted(p, next_stripped, footnote_ctx)
                     i = next_i + 1
                     last_type = 'list'
                     continue
@@ -801,7 +997,7 @@ def _md_to_docx_content(doc, md_text, spacing=None):
         if re.fullmatch(r'\s*!\[[^\]]*\]\([^)]+\)\s*', stripped) and len(doc.paragraphs) > 0:
             last_p = doc.paragraphs[-1]
             last_p.add_run(' ')
-            _add_inline_formatted(last_p, stripped)
+            _add_inline_formatted(last_p, stripped, footnote_ctx)
             i += 1
             continue
         # Markdown-таблица: собираем все строки таблицы подряд
@@ -813,6 +1009,12 @@ def _md_to_docx_content(doc, md_text, spacing=None):
                 j += 1
             # Парсим строки в ячейки
             rows_cells = [_parse_table_row(r) for r in table_rows_raw]
+            # Выравнивание из строки-разделителя (|:---|:---:|---:|)
+            col_alignments = []
+            for cells in rows_cells:
+                if _is_table_separator_row(cells):
+                    col_alignments = [_parse_col_alignment_from_separator(c) for c in cells]
+                    break
             # Убираем строки-разделители (|---|---|)
             data_rows = [cells for cells in rows_cells if not _is_table_separator_row(cells)]
             if data_rows:
@@ -835,10 +1037,44 @@ def _md_to_docx_content(doc, md_text, spacing=None):
                         while len(row_texts) < num_cols:
                             row_texts.append('')
                         cell_texts.append(row_texts)
-                    # Ширина столбца по содержимому: чем больше содержимого в столбце, тем шире столбец
-                    pt_per_char = 5.5
-                    col_content_pt = [max(len(cell_texts[ri][ci]) for ri in range(num_rows)) * pt_per_char for ci in range(num_cols)]
-                    col_content_pt = [max(w, 18) for w in col_content_pt]  # минимум ~18 pt на столбец
+                    # Для расчёта ширины столбцов используем отображаемый текст (ссылки → только текст)
+                    cell_texts_for_width = [[_text_for_width_calc(cell_texts[ri][ci]) for ci in range(num_cols)] for ri in range(num_rows)]
+                    # Ширина столбца как в MD; приоритет — даты/год, «Образование слова», «Обоснование»
+                    pt_per_char = 6.5
+                    padding_per_col = 24
+                    _date_in_re = re.compile(r'\d{4}-\d{2}-\d{2}|\d{1,2}\.\d{1,2}\.\d{4}|\d{1,2}/\d{1,2}/\d{4}')
+                    _year_in_re = re.compile(r'(?<!\d)\d{4}(?!\d)|\d{4}\s+г\.?')
+                    _sum_re = re.compile(r'^[\d\s.,]+$')
+                    header_row_texts = [cell_texts[0][ci] if ci < len(cell_texts[0]) else '' for ci in range(num_cols)]
+                    col_content_pt = []
+                    for ci in range(num_cols):
+                        max_len = max(len(cell_texts_for_width[ri][ci]) for ri in range(num_rows))
+                        is_short_col = max_len <= 10
+                        if is_short_col:
+                            w = max(max_len * pt_per_char + 10, 55)
+                        else:
+                            w = max_len * pt_per_char + padding_per_col
+                        cells = [cell_texts_for_width[ri][ci].strip() for ri in range(num_rows) if cell_texts_for_width[ri][ci].strip()]
+                        has_date = any(_date_in_re.search(c) for c in cells)
+                        has_year = any(_year_in_re.search(c) for c in cells)
+                        has_sum = any(_sum_re.match(c) for c in cells)
+                        hdr = (header_row_texts[ci] or '').lower()
+                        has_obraz = 'образование' in hdr or 'слово' in hdr
+                        has_obosn = 'обоснование' in hdr
+                        if is_short_col:
+                            base = w
+                            weight = 1.0
+                        else:
+                            min_pt = 32
+                            if has_date or has_year:
+                                min_pt = max(min_pt, 55)
+                            if has_sum:
+                                min_pt = max(min_pt, 55)
+                            base = max(w, min_pt)
+                            weight = 1.5 if (has_date or has_year) else 1.0
+                            if has_obraz or has_obosn:
+                                weight = max(weight, 1.4)
+                        col_content_pt.append((base * weight, is_short_col))
                     try:
                         table.autofit = False
                         try:
@@ -846,12 +1082,25 @@ def _md_to_docx_content(doc, md_text, spacing=None):
                         except Exception:
                             pass
                         content_width_pt = (21 - 2 - 1.5) * (72 / 2.54)  # область контента A4 в pt
-                        total_content_pt = sum(col_content_pt)
-                        # Если не вмещается — распределяем ширину страницы пропорционально содержимому каждого столбца
+                        col_vals = [x[0] for x in col_content_pt]
+                        short_cols = [x[1] for x in col_content_pt]
+                        total_content_pt = sum(col_vals)
+                        # Если не вмещается — распределяем, но короткие столбцы (≤10 символов) не сжимаем
                         if total_content_pt > content_width_pt and total_content_pt > 0:
-                            col_widths_pt = [content_width_pt * (w / total_content_pt) for w in col_content_pt]
+                            reserved = sum(col_vals[ci] for ci in range(num_cols) if short_cols[ci])
+                            remaining = content_width_pt - reserved
+                            long_cols_total = sum(col_vals[ci] for ci in range(num_cols) if not short_cols[ci])
+                            if remaining > 0 and long_cols_total > 0:
+                                col_widths_pt = []
+                                for ci in range(num_cols):
+                                    if short_cols[ci]:
+                                        col_widths_pt.append(col_vals[ci])
+                                    else:
+                                        col_widths_pt.append(remaining * (col_vals[ci] / long_cols_total))
+                            else:
+                                col_widths_pt = [content_width_pt * (w / total_content_pt) for w in col_vals]
                         else:
-                            col_widths_pt = list(col_content_pt)
+                            col_widths_pt = list(col_vals)
                         # Ширину задаём в дюймах (1 pt = 1/72 inch) и для каждой ячейки столбца — иначе Word выравнивает столбцы одинаково
                         for ci in range(num_cols):
                             w_inches = col_widths_pt[ci] / 72.0
@@ -861,6 +1110,10 @@ def _md_to_docx_content(doc, md_text, spacing=None):
                         table.width = Inches(sum(col_widths_pt) / 72.0)
                     except Exception:
                         pass
+                    # Размер шрифта: 8 pt при 10+ столбцах, иначе 10 pt заголовок / table_font_size тело
+                    font_header_pt = 8 if num_cols >= 10 else 10
+                    font_body_pt = 8 if num_cols >= 10 else table_font_size
+                    _set_table_header_repeat(table)
                     for ri, row_texts in enumerate(cell_texts):
                         for ci, t in enumerate(row_texts):
                             if ci >= num_cols:
@@ -868,10 +1121,24 @@ def _md_to_docx_content(doc, md_text, spacing=None):
                             cell = table.rows[ri].cells[ci]
                             para = cell.paragraphs[0]
                             para.clear()
-                            _add_run_with_emoji_font(para, t, bold=(ri == 0))
+                            if ri == 0:
+                                raw_hdr = _replace_md_images(data_rows[0][ci]).strip() if ci < len(data_rows[0]) else t
+                                _add_inline_formatted(para, raw_hdr, footnote_ctx)
+                            else:
+                                _add_inline_formatted(para, t)
                             for run in para.runs:
-                                run.font.size = Pt(9)
-                            para.alignment = WD_ALIGN_PARAGRAPH.CENTER
+                                run.font.size = Pt(font_header_pt if ri == 0 else font_body_pt)
+                                run.font.color.rgb = RGBColor(0, 0, 0)
+                            _set_cell_margins(cell, top=90, start=90, bottom=90, end=90)
+                            if ri == 0:
+                                pass
+                            elif alternating_rows and num_rows >= 15 and ri % 2 == 1:
+                                _set_cell_shading(cell, 'F5F5F5')
+                            display_len = len(_text_for_width_calc(t))
+                            if short_cols[ci] or (display_len <= 10) or (ri > 0 and _sum_re.match(t.strip()) and len(t.strip()) < 25):
+                                _set_cell_no_wrap(cell)
+                            align = col_alignments[ci] if ci < len(col_alignments) else WD_ALIGN_PARAGRAPH.LEFT
+                            para.alignment = align
                             try:
                                 cell.vertical_alignment = WD_ALIGN_VERTICAL.TOP
                             except Exception:
@@ -889,7 +1156,7 @@ def _md_to_docx_content(doc, md_text, spacing=None):
                 head_text = ' '.join(setext_content)
                 p_h = doc.add_heading(head_text, level=1)
                 p_h.clear()
-                _add_run_with_emoji_font(p_h, head_text)
+                _add_inline_formatted(p_h, head_text, footnote_ctx)
                 for run in p_h.runs:
                     run.font.size = Pt(16)
                 i = j + 1
@@ -900,7 +1167,7 @@ def _md_to_docx_content(doc, md_text, spacing=None):
                 head_text = ' '.join(setext_content)
                 p_h = doc.add_heading(head_text, level=2)  # Setext --- → H2
                 p_h.clear()
-                _add_run_with_emoji_font(p_h, head_text)
+                _add_inline_formatted(p_h, head_text, footnote_ctx)
                 for run in p_h.runs:
                     run.font.size = Pt(14)
                 i = j + 1
@@ -914,10 +1181,22 @@ def _md_to_docx_content(doc, md_text, spacing=None):
         if not found_setext:
             # Обычный параграф (нет setext подчёркивания или прервались на заголовке/списке)
             p = doc.add_paragraph()
-            _add_inline_formatted(p, stripped)
+            _add_inline_formatted(p, stripped, footnote_ctx)
             i += 1
             last_type = 'para'
         continue
+    # Раздел «Примечания» со сносками (ручная нумерация 1. 2. 3. — не продолжение списка)
+    if footnote_ctx['entries']:
+        doc.add_paragraph()
+        doc.add_heading('Примечания', level=2)
+        for num, (fn_id, fn_text) in enumerate(footnote_ctx['entries'], 1):
+            p_fn = doc.add_paragraph()
+            p_fn.paragraph_format.space_before = Pt(0)
+            p_fn.paragraph_format.space_after = Pt(3)
+            run_num = p_fn.add_run(f'{num}. ')
+            run_num.font.name = 'Segoe UI'
+            run_num.font.size = Pt(11)
+            _add_inline_formatted(p_fn, fn_text, None)
     elapsed = time.perf_counter() - t0
     msg = f"md-to-docx: разбор завершён, {n_lines} строк за {elapsed:.2f} с"
     if _log:
@@ -1562,9 +1841,9 @@ def export_to_docx(task_id):
         doc.save(file_stream)
         file_stream.seek(0)
         
-        # Формируем имя файла
+        # Формируем имя файла (ASCII для HTTP-заголовков)
         filename = f'analysis_{company_name}_{datetime.now().strftime("%Y%m%d")}.docx'
-        safe_filename = "".join(c for c in filename if c.isalnum() or c in (' ', '-', '_', '.')).rstrip()
+        safe_filename = "".join(c if ord(c) < 128 else '_' for c in filename).rstrip('_') or 'analysis.docx'
         
         logger.info(f"Экспорт результатов {task_id} в DOCX: {safe_filename}")
         
@@ -1578,6 +1857,151 @@ def export_to_docx(task_id):
     except Exception as e:
         logger.error(f"Ошибка при экспорте в DOCX для задачи {task_id}: {e}", exc_info=True)
         return jsonify({'error': f'Ошибка при создании документа: {str(e)}'}), 500
+
+
+def _postprocess_pandoc_docx(docx_bytes, spacing=None, options=None):
+    """Постобработка DOCX после Pandoc: отступы, межстрочный интервал, шрифт таблиц, чередование строк."""
+    if not DOCX_AVAILABLE or not docx_bytes:
+        return docx_bytes
+    try:
+        from docx import Document
+        doc = Document(io.BytesIO(docx_bytes))
+    except Exception:
+        return docx_bytes
+    spacing = spacing or {}
+    opts = options or {}
+    line_spacing = opts.get('line_spacing', 1.15)
+    table_font_size = opts.get('table_font_size', 9)
+    main_font_size = opts.get('main_font_size', 11)
+    alternating_rows = opts.get('alternating_rows', True)
+    def_pt = lambda key, subkey: (spacing.get(key, {}) or {}).get(subkey, 0)
+    main_pt = max(8, min(24, int(main_font_size) if main_font_size else 11))
+    # Normal: отступы, межстрочный интервал, размер шрифта
+    try:
+        s = doc.styles['Normal']
+        s.font.size = Pt(main_pt)
+        s.paragraph_format.space_before = Pt(def_pt('normal', 'before'))
+        s.paragraph_format.space_after = Pt(def_pt('normal', 'after'))
+        s.paragraph_format.line_spacing = line_spacing
+    except KeyError:
+        pass
+    # Heading 1-4
+    for level, def_before, def_after in [(1, 12, 6), (2, 10, 4), (3, 8, 4), (4, 6, 2)]:
+        try:
+            s = doc.styles[f'Heading {level}']
+            s.paragraph_format.space_before = Pt(def_pt(f'heading{level}', 'before') or def_before)
+            s.paragraph_format.space_after = Pt(def_pt(f'heading{level}', 'after') or def_after)
+        except KeyError:
+            pass
+    # Таблицы: шрифт и чередование строк
+    font_pt = max(6, min(24, int(table_font_size) if table_font_size else 9))
+    for table in doc.tables:
+        num_rows = len(table.rows)
+        for ri, row in enumerate(table.rows):
+            for cell in row.cells:
+                for para in cell.paragraphs:
+                    for run in para.runs:
+                        run.font.size = Pt(font_pt)
+            if alternating_rows and num_rows >= 15 and ri > 0 and ri % 2 == 1:
+                for cell in row.cells:
+                    _set_cell_shading(cell, 'F2F2F2')
+    out = io.BytesIO()
+    doc.save(out)
+    return out.getvalue()
+
+
+def _convert_md_to_docx_pandoc(md_bytes, base_name):
+    """Конвертация MD → DOCX через Pandoc (стандартный алгоритм)."""
+    try:
+        result = subprocess.run(['pandoc', '--version'], capture_output=True, text=True, timeout=5)
+        if result.returncode != 0:
+            return None, 'Pandoc не найден. Установите: https://pandoc.org/installing.html'
+    except FileNotFoundError:
+        return None, 'Pandoc не установлен. Установите: https://pandoc.org/installing.html'
+    except subprocess.TimeoutExpired:
+        return None, 'Ошибка проверки Pandoc'
+    with tempfile.TemporaryDirectory() as tmpdir:
+        md_path = Path(tmpdir) / 'input.md'
+        docx_path = Path(tmpdir) / 'output.docx'
+        md_path.write_bytes(md_bytes)
+        try:
+            result = subprocess.run(
+                ['pandoc', '-f', 'markdown', '-t', 'docx', '-o', str(docx_path), str(md_path)],
+                capture_output=True,
+                text=True,
+                timeout=MD_DOCX_TIMEOUT,
+                cwd=tmpdir
+            )
+            if result.returncode != 0:
+                err = (result.stderr or result.stdout or 'Неизвестная ошибка').strip()
+                return None, f'Ошибка Pandoc: {err}'
+            if not docx_path.exists():
+                return None, 'Pandoc не создал файл'
+            return docx_path.read_bytes(), None
+        except subprocess.TimeoutExpired:
+            return None, f'Конвертация заняла больше {MD_DOCX_TIMEOUT} с'
+
+
+@app.route('/api/convert/md-to-docx-pandoc', methods=['POST'])
+def convert_md_to_docx_pandoc():
+    """Конвертация MD → DOCX через Pandoc (стандартный алгоритм)."""
+    logger.info("POST /api/convert/md-to-docx-pandoc: запрос получен")
+    uploaded = request.files.get('file')
+    if not uploaded or uploaded.filename == '':
+        return jsonify({'error': 'Файл не выбран'}), 400
+    if not (uploaded.filename.lower().endswith('.md') or (getattr(uploaded, 'content_type', '') or '').startswith('text/')):
+        return jsonify({'error': 'Требуется файл Markdown (.md)'}), 400
+    try:
+        md_bytes = uploaded.read()
+        logger.info(f"POST /api/convert/md-to-docx-pandoc: файл прочитан, {len(md_bytes)} байт")
+    except Exception as e:
+        logger.error(f"Ошибка чтения файла MD → DOCX (Pandoc): {e}", exc_info=True)
+        return jsonify({'error': f'Не удалось прочитать файл: {str(e)}'}), 500
+    try:
+        md_text = md_bytes.decode('utf-8')
+    except UnicodeDecodeError:
+        try:
+            md_text = md_bytes.decode('utf-8-sig')
+        except UnicodeDecodeError:
+            try:
+                md_text = md_bytes.decode('cp1251')
+            except (UnicodeDecodeError, LookupError):
+                return jsonify({'error': 'Неподдерживаемая кодировка. Сохраните файл в UTF-8.'}), 400
+        md_bytes = md_text.encode('utf-8')
+    docx_bytes, err = _convert_md_to_docx_pandoc(md_bytes, Path(uploaded.filename).stem)
+    if err:
+        logger.warning(f"Pandoc конвертация: {err}")
+        return jsonify({'error': err}), 500
+    use_pandoc_default = request.form.get('use_pandoc_default') in ('1', 'true', 'yes')
+    if not use_pandoc_default:
+        spacing = None
+        options = None
+        try:
+            raw = request.form.get('spacing')
+            if raw:
+                spacing = json.loads(raw)
+        except (TypeError, ValueError):
+            pass
+        try:
+            raw_opts = request.form.get('options')
+            if raw_opts:
+                options = json.loads(raw_opts)
+        except (TypeError, ValueError):
+            pass
+        docx_bytes = _postprocess_pandoc_docx(docx_bytes, spacing=spacing, options=options)
+    safe_name = "".join(c for c in Path(uploaded.filename).stem if c.isalnum() or c in (' ', '-', '_')).rstrip() or 'document'
+    download_name = f"{safe_name}_{datetime.now().strftime('%Y%m%d')}.docx"
+    download_name_ascii = "".join(c if ord(c) < 128 else '_' for c in download_name).rstrip('_') or 'document.docx'
+    disp_ascii = f'attachment; filename="{download_name_ascii}"'
+    try:
+        disp_value = f'{disp_ascii}; filename*=UTF-8\'\'{quote(download_name, safe="")}'
+    except Exception:
+        disp_value = disp_ascii
+    resp = Response(docx_bytes, status=200, mimetype='application/vnd.openxmlformats-officedocument.wordprocessingml.document')
+    resp.headers['Content-Disposition'] = disp_value
+    resp.headers['Content-Length'] = str(len(docx_bytes))
+    logger.info(f"POST /api/convert/md-to-docx-pandoc: готово, {len(docx_bytes)} байт")
+    return resp
 
 
 @app.route('/api/convert/md-to-docx', methods=['POST'])
@@ -1610,17 +2034,24 @@ def convert_md_to_docx():
                     'error': 'Неподдерживаемая кодировка файла. Сохраните файл в UTF-8 и попробуйте снова.'
                 }), 400
     spacing = None
+    options = None
     try:
         raw = request.form.get('spacing')
         if raw:
             spacing = json.loads(raw)
     except (TypeError, ValueError):
         pass
+    try:
+        raw_opts = request.form.get('options')
+        if raw_opts:
+            options = json.loads(raw_opts)
+    except (TypeError, ValueError):
+        pass
 
     def do_convert():
         doc = Document()
         t1 = time.perf_counter()
-        _md_to_docx_content(doc, md_text, spacing=spacing)
+        _md_to_docx_content(doc, md_text, spacing=spacing, options=options)
         t2 = time.perf_counter()
         file_stream = io.BytesIO()
         doc.save(file_stream)
@@ -1641,8 +2072,17 @@ def convert_md_to_docx():
         base_name = Path(uploaded.filename).stem
         safe_name = "".join(c for c in base_name if c.isalnum() or c in (' ', '-', '_')).rstrip() or 'document'
         download_name = f"{safe_name}_{datetime.now().strftime('%Y%m%d')}.docx"
+        # ASCII fallback — HTTP-заголовки latin-1 не поддерживают кириллицу
+        download_name_ascii = "".join(c if ord(c) < 128 else '_' for c in download_name).rstrip('_') or 'document.docx'
+        # RFC 5987: filename* для Unicode, filename — ASCII fallback
+        disp_ascii = f'attachment; filename="{download_name_ascii}"'
+        try:
+            encoded = quote(download_name, safe='')
+            disp_value = f'{disp_ascii}; filename*=UTF-8\'\'{encoded}'
+        except Exception:
+            disp_value = disp_ascii
         resp = Response(docx_bytes, status=200, mimetype='application/vnd.openxmlformats-officedocument.wordprocessingml.document')
-        resp.headers['Content-Disposition'] = f'attachment; filename="{download_name}"'
+        resp.headers['Content-Disposition'] = disp_value
         resp.headers['Content-Length'] = str(len(docx_bytes))
         return resp
     except FuturesTimeoutError:

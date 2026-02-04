@@ -15,6 +15,11 @@ ENV PYTHONUNBUFFERED=1 \
     FLASK_PORT=5000 \
     FLASK_DEBUG=False
 
+# Устанавливаем Pandoc для MD → DOCX (кнопка «MD → DOCX»)
+RUN apt-get update && apt-get install -y --no-install-recommends pandoc && \
+    rm -rf /var/lib/apt/lists/* && \
+    pandoc --version
+
 # Создаем non-root пользователя для безопасности
 RUN groupadd -r appuser && \
     useradd -r -g appuser -m -d /home/appuser appuser && \

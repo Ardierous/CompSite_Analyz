@@ -1,4 +1,5 @@
 # Web application dependencies
+# Для кнопки «MD → DOCX» (Pandoc) требуется установленный Pandoc: https://pandoc.org/installing.html
 flask>=3.0.0
 flask-cors>=4.0.0
 python-dotenv>=1.0.0

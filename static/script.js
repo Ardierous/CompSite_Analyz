@@ -18,6 +18,7 @@ const newAnalysisBtn = document.getElementById('newAnalysisBtn');
 const instrumentsBlock = document.getElementById('instrumentsBlock');
 const analysisSection = document.getElementById('analysisSection');
 const btnMdToDocx = document.getElementById('btnMdToDocx');
+const btnMdToDocxCustom = document.getElementById('btnMdToDocxCustom');
 const btnAnalysis = document.getElementById('btnAnalysis');
 const backToInstrumentsBtn = document.getElementById('backToInstrumentsBtn');
 const toolModalOverlay = document.getElementById('toolModalOverlay');
@@ -25,6 +26,12 @@ const toolModalCloseBtn = document.getElementById('toolModalCloseBtn');
 const toolModalMdToDocxBtn = document.getElementById('toolModalMdToDocxBtn');
 const toolModalError = document.getElementById('toolModalError');
 const mdFileInput = document.getElementById('mdFileInput');
+const toolModalTitle = document.getElementById('toolModalTitle');
+const mdDocxCustomOptions = document.getElementById('mdDocxCustomOptions');
+const mdDocxPandocDefaultRow = document.getElementById('mdDocxPandocDefaultRow');
+const mdDocxPandocDefault = document.getElementById('mdDocxPandocDefault');
+const mdDocxPostprocessSettings = document.getElementById('mdDocxPostprocessSettings');
+const mdDocxListMarkerRow = document.getElementById('mdDocxListMarkerRow');
 const entryBtn = document.getElementById('entryBtn');
 const loginModalOverlay = document.getElementById('loginModalOverlay');
 const loginPasswordInput = document.getElementById('loginPasswordInput');
@@ -363,16 +370,54 @@ document.getElementById('closeError').addEventListener('click', () => {
     errorContainer.style.display = 'none';
 });
 
-// Главный экран: кнопка «MD → DOCX» открывает модалку конвертера
-if (btnMdToDocx && toolModalOverlay) {
-    btnMdToDocx.addEventListener('click', () => {
-        toolModalOverlay.style.display = 'flex';
-        toolModalOverlay.setAttribute('aria-hidden', 'false');
-        if (toolModalError) {
-            toolModalError.style.display = 'none';
-            toolModalError.textContent = '';
-        }
+function setPostprocessSettingsEnabled(enabled) {
+    if (!mdDocxPostprocessSettings) return;
+    const inputs = mdDocxPostprocessSettings.querySelectorAll('input, select');
+    inputs.forEach(el => {
+        el.disabled = !enabled;
     });
+}
+
+// Открытие модалки MD→DOCX с выбором движка (pandoc / custom)
+function openMdToDocxModal(engine) {
+    if (!toolModalOverlay) return;
+    toolModalOverlay.dataset.engine = engine || 'pandoc';
+    toolModalOverlay.style.display = 'flex';
+    toolModalOverlay.setAttribute('aria-hidden', 'false');
+    if (toolModalError) {
+        toolModalError.style.display = 'none';
+        toolModalError.textContent = '';
+    }
+    if (toolModalTitle) {
+        toolModalTitle.textContent = engine === 'custom' ? 'MD → DOCX (свой алгоритм)' : 'MD → DOCX (Pandoc)';
+    }
+    if (mdDocxCustomOptions) {
+        mdDocxCustomOptions.style.display = 'block';
+    }
+    if (mdDocxPandocDefaultRow) {
+        mdDocxPandocDefaultRow.style.display = engine === 'pandoc' ? 'block' : 'none';
+    }
+    if (mdDocxListMarkerRow) {
+        mdDocxListMarkerRow.style.display = engine === 'custom' ? 'flex' : 'none';
+    }
+    if (engine === 'pandoc' && mdDocxPandocDefault) {
+        const useDefault = mdDocxPandocDefault.checked;
+        setPostprocessSettingsEnabled(!useDefault);
+    } else {
+        setPostprocessSettingsEnabled(true);
+    }
+}
+
+if (mdDocxPandocDefault) {
+    mdDocxPandocDefault.addEventListener('change', () => {
+        setPostprocessSettingsEnabled(!mdDocxPandocDefault.checked);
+    });
+}
+if (btnMdToDocx && toolModalOverlay) {
+    btnMdToDocx.addEventListener('click', () => openMdToDocxModal('pandoc'));
+}
+if (btnMdToDocxCustom && toolModalOverlay) {
+    btnMdToDocxCustom.addEventListener('click', () => openMdToDocxModal('custom'));
 }
 
 // Кнопка «Анализ корпоративного сайта» — показываем секцию анализа
@@ -574,11 +619,13 @@ if (mdFileInput) {
         const file = mdFileInput.files[0];
         if (!file) return;
         const btn = toolModalMdToDocxBtn;
+        const engine = (toolModalOverlay && toolModalOverlay.dataset.engine) || 'pandoc';
         hideToolModalError();
         if (btn) btn.disabled = true;
         try {
             const formData = new FormData();
             formData.append('file', file);
+            formData.append('engine', engine);
             const spacing = {
                 normal: { before: parseInt(document.getElementById('mdDocxNormalBefore')?.value || 0, 10) || 0, after: parseInt(document.getElementById('mdDocxNormalAfter')?.value || 0, 10) || 0 },
                 heading1: { before: parseInt(document.getElementById('mdDocxH1Before')?.value || 12, 10) || 0, after: parseInt(document.getElementById('mdDocxH1After')?.value || 6, 10) || 0 },
@@ -587,7 +634,18 @@ if (mdFileInput) {
                 heading4: { before: parseInt(document.getElementById('mdDocxH4Before')?.value || 6, 10) || 0, after: parseInt(document.getElementById('mdDocxH4After')?.value || 2, 10) || 0 },
             };
             formData.append('spacing', JSON.stringify(spacing));
-            const response = await fetch('/api/convert/md-to-docx', {
+            const usePandocDefault = (engine === 'pandoc' && document.getElementById('mdDocxPandocDefault')?.checked);
+            formData.append('use_pandoc_default', usePandocDefault ? '1' : '0');
+            const options = {
+                line_spacing: parseFloat(document.getElementById('mdDocxLineSpacing')?.value || 1.15),
+                table_font_size: parseInt(document.getElementById('mdDocxTableFont')?.value || 9, 10) || 9,
+                main_font_size: parseInt(document.getElementById('mdDocxMainFont')?.value || 11, 10) || 11,
+                alternating_rows: document.getElementById('mdDocxAlternatingRows')?.checked !== false,
+                list_marker: document.getElementById('mdDocxListMarker')?.value || 'default',
+            };
+            formData.append('options', JSON.stringify(options));
+            const apiUrl = engine === 'custom' ? '/api/convert/md-to-docx' : '/api/convert/md-to-docx-pandoc';
+            const response = await fetch(apiUrl, {
                 method: 'POST',
                 body: formData,
             });
