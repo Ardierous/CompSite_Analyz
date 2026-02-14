@@ -20,5 +20,6 @@ services:
     env_file:
       - ../.env
     restart: unless-stopped
+    ipc: host  # Рекомендуется для Playwright/Chromium на Linux
     # Код берется из образа, volumes не нужны
 

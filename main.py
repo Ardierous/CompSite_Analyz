@@ -305,6 +305,14 @@ except ImportError:
 os.environ["CREWAI_TELEMETRY_OPT_OUT"] = "1"
 os.environ["CREWAI_TRACING_ENABLED"] = "false"
 
+# Предзагрузка CrewAI в главном потоке — иначе при первом анализе (в worker-потоке)
+# телеметрия CrewAI пытается зарегистрировать signal.signal() и падает с
+# ValueError: signal only works in main thread
+try:
+    from Agents_crew import crew  # noqa: F401
+except Exception:
+    pass
+
 # Вспомогательная функция для записи в debug.log (опционально)
 def update_progress_safely(task_id, new_progress, message=None):
     """
@@ -436,16 +444,28 @@ def _is_emoji_char(c):
 
 
 def _strip_emoji(text):
-    """Удаляет эмодзи и символы категории So из текста. Убирает лишний пробел после удалённого эмодзи."""
+    """Удаляет эмодзи и символы категории So из текста. Убирает только пробел, оставшийся после удалённого эмодзи (не трогает пробелы между словами)."""
     if not text:
         return text
-    return ''.join(c for c in text if not _is_emoji_char(c)).lstrip()
+    result = []
+    i = 0
+    while i < len(text):
+        c = text[i]
+        if _is_emoji_char(c):
+            i += 1
+            if i < len(text) and text[i] == ' ':
+                i += 1
+            continue
+        result.append(c)
+        i += 1
+    return ''.join(result)
 
 
 def _add_run_with_emoji_font(paragraph, text, bold=False, italic=False, strike=False, font_name=None):
-    """Добавляет текст в параграф. Эмодзи удаляются."""
+    """Добавляет текст в параграф. Эмодзи удаляются. Длинное тире заменяется на обычное."""
     if not text:
         return
+    text = text.replace('\u2014', '\u2013')  # — (em dash) → – (en dash)
     text = _strip_emoji(text)
     if not text:
         return
@@ -462,9 +482,59 @@ def _normalize_url(url):
     if not url or not url.strip():
         return url
     u = url.strip()
-    if not u.startswith(('http://', 'https://', 'mailto:', '#')) and u.startswith('www.'):
-        return 'https://' + u
+    if not u.startswith(('http://', 'https://', 'mailto:', '#')):
+        if u.startswith('www.'):
+            return 'https://' + u
+        if u.startswith(('/')):
+            return u  # относительный путь — не нормализуем
     return u
+
+
+def _extract_urls_from_markdown(text):
+    """Извлекает все URL из markdown: [text](url) и голые https?://... и www...."""
+    urls = set()
+    if not text:
+        return urls
+    def _add(u):
+        u = _normalize_url(u)
+        if u and not u.startswith('#') and not u.startswith('mailto:'):
+            urls.add(u)
+            if u.endswith('/'):
+                urls.add(u.rstrip('/'))
+            else:
+                urls.add(u + '/')
+    for m in _RE_LINK.finditer(text):
+        _add(m.group(2).strip())
+    for m in _RE_BARE_URL.finditer(text):
+        _add(m.group(1))
+    return urls
+
+
+def _url_is_verified(url, verified_urls, company_url=None):
+    """Можно ли сделать ссылку кликабельной: только проверенные или того же домена."""
+    if not url or not url.strip():
+        return False
+    url_norm = _normalize_url(url.strip())
+    if url_norm.startswith('/') and company_url:
+        try:
+            cmp = urlparse(company_url)
+            base = f"{cmp.scheme or 'https'}://{cmp.netloc}"
+            url_norm = base.rstrip('/') + ('/' if not url_norm.startswith('/') else '') + url_norm
+        except Exception:
+            pass
+    if verified_urls is not None:
+        return url_norm in verified_urls
+    if company_url:
+        try:
+            cmp = urlparse(company_url)
+            lnk = urlparse(url_norm)
+            if lnk.netloc and cmp.netloc:
+                cmp_domain = cmp.netloc.lower().replace('www.', '')
+                lnk_domain = lnk.netloc.lower().replace('www.', '')
+                return lnk_domain == cmp_domain or lnk_domain.endswith('.' + cmp_domain)
+        except Exception:
+            pass
+    return False
 
 
 def _add_hyperlink(paragraph, text, url):
@@ -474,6 +544,7 @@ def _add_hyperlink(paragraph, text, url):
         return
     try:
         url = _normalize_url(url)
+        text = text.replace('\u2014', '\u2013')  # длинное тире → обычное
         part = paragraph.part
         r_id = part.relate_to(url, RELATIONSHIP_TYPE.HYPERLINK, is_external=True)
         hyperlink = OxmlElement('w:hyperlink')
@@ -532,17 +603,23 @@ def _apply_backslash_escapes(text):
     return ''.join(result)
 
 
-def _split_and_add_with_bare_urls(paragraph, text):
-    """Разбивает текст по голым URL и добавляет в параграф; URL делаются кликабельными."""
+def _split_and_add_with_bare_urls(paragraph, text, footnote_ctx=None):
+    """Разбивает текст по голым URL и добавляет в параграф; URL делаются кликабельными только если проверены."""
     if not text or not _RE_BARE_URL.search(text):
         _add_run_with_emoji_font(paragraph, text)
         return
+    ctx = footnote_ctx or {}
+    verified = ctx.get('verified_urls')
+    company_url = ctx.get('company_url')
     last = 0
     for m in _RE_BARE_URL.finditer(text):
         if m.start() > last:
             _add_run_with_emoji_font(paragraph, text[last:m.start()])
         url = _normalize_url(m.group(1))
-        _add_hyperlink(paragraph, m.group(1), url)
+        if _url_is_verified(url, verified, company_url):
+            _add_hyperlink(paragraph, m.group(1), url)
+        else:
+            _add_run_with_emoji_font(paragraph, m.group(1))
         last = m.end()
     if last < len(text):
         _add_run_with_emoji_font(paragraph, text[last:])
@@ -555,7 +632,7 @@ def _add_inline_formatted(paragraph, text, footnote_ctx=None):
     # Быстрый путь: нет спецсимволов — один add_run без regex (с разбивкой по эмодзи)
     if '*' not in text and '_' not in text and '`' not in text and '~' not in text and '[' not in text:
         if 'http' in text or 'www.' in text:
-            _split_and_add_with_bare_urls(paragraph, text)
+            _split_and_add_with_bare_urls(paragraph, text, footnote_ctx)
         else:
             _add_run_with_emoji_font(paragraph, text)
         return
@@ -611,17 +688,28 @@ def _add_inline_formatted(paragraph, text, footnote_ctx=None):
             m = _RE_LINK.match(part)
             if m:
                 link_text = _strip_emoji(m.group(1))
-                if link_text:
-                    _add_hyperlink(paragraph, link_text, m.group(2))
+                url = m.group(2)
+                verified = (footnote_ctx or {}).get('verified_urls')
+                company_url = (footnote_ctx or {}).get('company_url')
+                if _url_is_verified(url, verified, company_url):
+                    if link_text:
+                        _add_hyperlink(paragraph, link_text, url)
+                    else:
+                        _add_hyperlink(paragraph, url, url)
                 else:
-                    _add_hyperlink(paragraph, m.group(2), m.group(2))
+                    _add_run_with_emoji_font(paragraph, link_text or url)
             else:
                 _add_run_with_emoji_font(paragraph, part)
         elif part.startswith(('http://', 'https://', 'www.')):
             url = _normalize_url(part.rstrip('.,;:!?'))
-            _add_hyperlink(paragraph, part, url)
+            verified = (footnote_ctx or {}).get('verified_urls')
+            company_url = (footnote_ctx or {}).get('company_url')
+            if _url_is_verified(url, verified, company_url):
+                _add_hyperlink(paragraph, part, url)
+            else:
+                _add_run_with_emoji_font(paragraph, part)
         else:
-            _split_and_add_with_bare_urls(paragraph, part)
+            _split_and_add_with_bare_urls(paragraph, part, footnote_ctx)
 
 
 def _normalize_task_list_text(text):
@@ -744,8 +832,8 @@ def _set_table_header_repeat(table):
         pass
 
 
-def _md_to_docx_content(doc, md_text, spacing=None, options=None):
-    """Заполняет документ python-docx контентом из Markdown. spacing — отступы (пт). options — line_spacing, table_font_size, alternating_rows, list_marker."""
+def _md_to_docx_content(doc, md_text, spacing=None, options=None, verified_urls=None, company_url=None):
+    """Заполняет документ python-docx контентом из Markdown. verified_urls — только эти URL делаются кликабельными. company_url — для проверки по домену если verified_urls нет."""
     t0 = time.perf_counter()
     def_pt = lambda d, key, subkey: (d or {}).get(key, {}).get(subkey, 0)
     if spacing is None:
@@ -794,7 +882,7 @@ def _md_to_docx_content(doc, md_text, spacing=None, options=None):
         else:
             lines_no_fndefs.append(line)
     lines = lines_no_fndefs
-    footnote_ctx = {'defs': footnote_defs, 'entries': [], 'id_to_num': {}}
+    footnote_ctx = {'defs': footnote_defs, 'entries': [], 'id_to_num': {}, 'verified_urls': verified_urls, 'company_url': company_url}
     n_lines = len(lines)
     i = 0
     in_fence = False
@@ -905,16 +993,19 @@ def _md_to_docx_content(doc, md_text, spacing=None, options=None):
             i = j
             last_type = 'code'
             continue
-        # Заголовки раздела I. II. III. (римские цифры) — как Heading 1
+        # Заголовки раздела I. II. III. (римские цифры) — Heading 2 с отступом от предыдущего абзаца
         rm = re.match(r'^(I|II|III|IV|V|VI|VII|VIII|IX|X)\.\s+(.+)$', stripped, re.IGNORECASE)
         if rm:
             head_text = rm.group(2).strip()
             if head_text:
-                p_h = doc.add_heading(head_text, level=1)
+                p_h = doc.add_heading(head_text, level=2)
                 p_h.clear()
                 _add_inline_formatted(p_h, head_text, footnote_ctx)
                 for run in p_h.runs:
-                    run.font.size = Pt(16)
+                    run.font.size = Pt(14)
+                pf = p_h.paragraph_format
+                pf.space_before = Pt(12)
+                pf.space_after = Pt(6)
                 i += 1
                 last_type = 'heading'
                 continue
@@ -928,6 +1019,9 @@ def _md_to_docx_content(doc, md_text, spacing=None, options=None):
             _add_inline_formatted(p_h, head_text, footnote_ctx)
             for run in p_h.runs:
                 run.font.size = Pt([16, 14, 13, 12][min(level, 4) - 1])
+            pf = p_h.paragraph_format
+            pf.space_before = Pt(12)
+            pf.space_after = Pt(6)
             i += 1
             last_type = 'heading'
             continue
@@ -1192,22 +1286,28 @@ def _md_to_docx_content(doc, md_text, spacing=None, options=None):
             n = lines[j].strip()
             if re.match(r'^=+\s*$', n):
                 head_text = ' '.join(setext_content)
-                p_h = doc.add_heading(head_text, level=1)
+                p_h = doc.add_heading(head_text, level=2)
                 p_h.clear()
                 _add_inline_formatted(p_h, head_text, footnote_ctx)
                 for run in p_h.runs:
-                    run.font.size = Pt(16)
+                    run.font.size = Pt(14)
+                pf = p_h.paragraph_format
+                pf.space_before = Pt(12)
+                pf.space_after = Pt(6)
                 i = j + 1
                 last_type = 'heading'
                 found_setext = True
                 break
             if re.match(r'^\-+\s*$', n) and len(n) >= 3:
                 head_text = ' '.join(setext_content)
-                p_h = doc.add_heading(head_text, level=2)  # Setext --- → H2
+                p_h = doc.add_heading(head_text, level=2)
                 p_h.clear()
                 _add_inline_formatted(p_h, head_text, footnote_ctx)
                 for run in p_h.runs:
                     run.font.size = Pt(14)
+                pf = p_h.paragraph_format
+                pf.space_before = Pt(12)
+                pf.space_after = Pt(6)
                 i = j + 1
                 last_type = 'heading'
                 found_setext = True
@@ -1659,6 +1759,17 @@ def run_analysis(task_id, company_url, initial_balance=None):
         
         result = _crew.kickoff(inputs=inputs)
         
+        # Извлекаем проверенные URL из Task 1 для фильтрации ссылок в DOCX
+        verified_urls = set()
+        try:
+            task1_path = Path(__file__).parent / 'tasks' / 'task_1_scraped_data.md'
+            if task1_path.exists():
+                task1_text = task1_path.read_text(encoding='utf-8', errors='replace')
+                verified_urls = _extract_urls_from_markdown(task1_text)
+                logger.info(f"[{task_id}] Извлечено {len(verified_urls)} проверенных URL из Task 1")
+        except Exception as e:
+            logger.warning(f"[{task_id}] Не удалось извлечь URL из Task 1: {e}")
+        
         # Останавливаем поток обновления прогресса
         progress_thread_running.clear()
         
@@ -1703,7 +1814,8 @@ def run_analysis(task_id, company_url, initial_balance=None):
             'company_name': company_name,
             'timestamp': datetime.now().isoformat(),
             'cost': cost,
-            'task_id': task_id  # Добавляем task_id для экспорта
+            'task_id': task_id,
+            'verified_urls': list(verified_urls) if verified_urls else None
         }
         
         # Устанавливаем статус "завершено"
@@ -1815,10 +1927,14 @@ def export_to_docx(task_id):
         pf_header.space_before = Pt(0)
         pf_header.space_after = Pt(0)
         
-        # Основной контент — полный разбор Markdown с кликабельными ссылками
+        # Основной контент — полный разбор Markdown; только проверенные ссылки — кликабельные
         content = result_data.get('result', '')
+        v_urls = result_data.get('verified_urls')
+        verified_urls = set(v_urls) if v_urls else None
+        company_url = result_data.get('url', '')
         if content:
-            _md_to_docx_content(doc, content, spacing=None, options={'line_spacing': 1.15, 'main_font_size': 11})
+            _md_to_docx_content(doc, content, spacing=None, options={'line_spacing': 1.15, 'main_font_size': 11},
+                                verified_urls=verified_urls, company_url=company_url)
         
         # Сохраняем в память
         file_stream = io.BytesIO()

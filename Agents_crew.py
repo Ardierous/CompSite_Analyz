@@ -171,9 +171,114 @@ if CREWAI_IMPORTED:
         EXTRACT_LINKS_AVAILABLE = False
         ExtractSiteLinksTool = None
         print(f"⚠️  ExtractSiteLinksTool недоступен: {e}")
+
+    # Playwright-инструменты — fallback для сайтов с защитой от ботов (Tatneft и подобные)
+    # Аргументы для Chromium: обязательны на VPS/Linux/Docker (headless без display)
+    _CHROMIUM_ARGS = ["--no-sandbox", "--disable-dev-shm-usage"]
+    try:
+        from playwright.sync_api import sync_playwright  # type: ignore[import-untyped]
+        from urllib.parse import urljoin, urlparse
+        from bs4 import BeautifulSoup
+
+        class ScrapeWithPlaywrightInput(BaseModel):
+            url: str = Field(..., description="URL страницы")
+
+        class ScrapeWithPlaywrightTool(BaseTool):
+            name: str = "ScrapeWithPlaywright"
+            description: str = (
+                "Скрапинг через браузер (Playwright). Используй, когда ScrapeWebsiteTool выдаёт ошибку или пустой результат — "
+                "браузер выполняет JS и может обойти часть защит (куки, Cloudflare). Возвращает текст страницы."
+            )
+            args_schema: type[BaseModel] = ScrapeWithPlaywrightInput
+
+            def _run(self, url: str) -> str:
+                try:
+                    with sync_playwright() as p:
+                        browser = p.chromium.launch(headless=True, args=_CHROMIUM_ARGS)
+                        ctx = browser.new_context(
+                            user_agent="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/120.0.0.0 Safari/537.36",
+                            viewport={"width": 1920, "height": 1080},
+                        )
+                        page = ctx.new_page()
+                        page.goto(url, wait_until="domcontentloaded", timeout=20000)
+                        page.wait_for_timeout(2000)
+                        for sel in ['button:has-text("Принять")', 'button:has-text("Согласен")', '[data-testid="accept-cookies"]', '.cookie-accept', '#accept-cookies']:
+                            try:
+                                if page.locator(sel).count() > 0:
+                                    page.locator(sel).first.click(timeout=3000)
+                                    page.wait_for_timeout(1000)
+                                    break
+                            except Exception:
+                                pass
+                        text = page.inner_text("body", timeout=5000) or ""
+                        browser.close()
+                        return (text[:15000] + "\n...[обрезано]") if len(text) > 15000 else text
+                except Exception as e:
+                    return f"Ошибка Playwright для {url}: {e}"
+
+        class ExtractLinksPlaywrightInput(BaseModel):
+            url: str = Field(..., description="URL страницы")
+
+        class ExtractLinksWithPlaywrightTool(BaseTool):
+            name: str = "ExtractLinksWithPlaywright"
+            description: str = (
+                "Извлечение ссылок через браузер. Используй, когда ExtractSiteLinks вернул ошибку — "
+                "браузер с JS обходит защиту. Возвращает [текст](url)."
+            )
+            args_schema: type[BaseModel] = ExtractLinksPlaywrightInput
+
+            def _run(self, url: str) -> str:
+                try:
+                    with sync_playwright() as p:
+                        browser = p.chromium.launch(headless=True, args=_CHROMIUM_ARGS)
+                        ctx = browser.new_context(user_agent="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/120.0.0.0 Safari/537.36")
+                        page = ctx.new_page()
+                        page.goto(url, wait_until="domcontentloaded", timeout=20000)
+                        page.wait_for_timeout(2000)
+                        for sel in ['button:has-text("Принять")', 'button:has-text("Согласен")', '.cookie-accept']:
+                            try:
+                                if page.locator(sel).count() > 0:
+                                    page.locator(sel).first.click(timeout=2000)
+                                    page.wait_for_timeout(800)
+                                    break
+                            except Exception:
+                                pass
+                        html = page.content()
+                        browser.close()
+                    soup = BeautifulSoup(html, "html.parser")
+                    base_netloc = urlparse(url).netloc.lower()
+                    seen, lines = set(), []
+                    for a in soup.find_all("a", href=True):
+                        href = (a["href"] or "").strip()
+                        if not href or href.startswith(("#", "javascript:", "mailto:")):
+                            continue
+                        abs_url = urljoin(url, href)
+                        try:
+                            if urlparse(abs_url).netloc.lower() != base_netloc:
+                                continue
+                        except Exception:
+                            continue
+                        text = (a.get_text() or href).strip()[:80] or abs_url
+                        key = (abs_url, text)
+                        if key not in seen:
+                            seen.add(key)
+                            lines.append(f"- [{text}]({abs_url})")
+                    return "Ссылки со страницы:\n" + "\n".join(lines) if lines else f"На странице {url} не найдено внутренних ссылок."
+                except Exception as e:
+                    return f"Ошибка ExtractLinksWithPlaywright для {url}: {e}"
+
+        PLAYWRIGHT_AVAILABLE = True
+    except Exception as e:
+        PLAYWRIGHT_AVAILABLE = False
+        ScrapeWithPlaywrightTool = None
+        ExtractLinksWithPlaywrightTool = None
+        print(f"⚠️  Playwright-инструменты недоступны: {e}. Установите: pip install playwright && playwright install chromium. На VPS/Linux: playwright install-deps")
 else:
     EXTRACT_LINKS_AVAILABLE = False
     ExtractSiteLinksTool = None
+    PLAYWRIGHT_AVAILABLE = False
+    ScrapeWithPlaywrightTool = None
+    ExtractLinksWithPlaywrightTool = None
 
 # Настройка переменных окружения для OpenAI
 api_key = os.getenv("OPENAI_API_KEY")
@@ -253,11 +358,21 @@ else:
         except: pass
         # #endregion
         # Создаем инструмент для скрапинга (только для указанного сайта)
+        # Playwright — первым для сайтов с защитой (Tatneft, и др.): браузер обходит антибот.
         scraper_tools = []
+        if PLAYWRIGHT_AVAILABLE and ScrapeWithPlaywrightTool:
+            try:
+                scraper_tools.append(ScrapeWithPlaywrightTool())
+            except Exception as e:
+                print(f"⚠️  Не удалось создать ScrapeWithPlaywrightTool: {e}")
+        if PLAYWRIGHT_AVAILABLE and ExtractLinksWithPlaywrightTool:
+            try:
+                scraper_tools.append(ExtractLinksWithPlaywrightTool())
+            except Exception as e:
+                print(f"⚠️  Не удалось создать ExtractLinksWithPlaywrightTool: {e}")
         if SCRAPE_TOOL_AVAILABLE:
             try:
-                scraper_tool = ScrapeWebsiteTool()
-                scraper_tools = [scraper_tool]
+                scraper_tools.append(ScrapeWebsiteTool())
             except Exception as e:
                 print(f"⚠️  Не удалось создать ScrapeWebsiteTool: {e}")
         if EXTRACT_LINKS_AVAILABLE and ExtractSiteLinksTool:
@@ -455,10 +570,10 @@ else:
     ПРИНЦИП: Извлекайте МАКСИМУМ информации. Не опускайте детали. Каждый найденный факт — в отчёт.
     
     АЛГОРИТМ РАБОТЫ:
-    1. Вызовите инструмент скрапинга для {company_url} — получите содержимое главной страницы
-    2. В ответе инструмента найдите ВСЕ ссылки (href). Копируйте URL ДОСЛОВНО — не придумывайте и не формируйте их сами
-    3. Для глубокого сбора вызовите инструмент для ключевых страниц (например /about, /products и т.д.), если такие ссылки есть в ответе
-    4. Извлекайте максимум текста: описания, цифры, имена, даты — всё, что есть на странице
+    1. Вызови ScrapeWebsiteTool для {company_url}. Если ошибка или пустой результат — вызови ScrapeWithPlaywright (браузер с JS, обходит защиту)
+    2. В ответе найдите ВСЕ ссылки. Копируй URL ДОСЛОВНО. Если ExtractSiteLinks выдал ошибку — используй ExtractLinksWithPlaywright
+    3. Для глубокого сбора вызывай инструмент для ключевых страниц из ответа
+    4. Извлекай максимум текста: описания, цифры, имена, даты
     
     Посетите корпоративный сайт {company_url} и извлеките следующую информацию ТОЛЬКО с этого сайта:
     
@@ -494,11 +609,9 @@ else:
        - Ключевые события развития
 
     7. СТРУКТУРА САЙТА (для Приложения в отчёте):
-       - Вызови ExtractSiteLinks для {company_url} — получи РЕАЛЬНЫЕ ссылки
-       - Выбери ДО 10 ОСНОВНЫХ разделов (Главная, О компании, Продукция, Контакты и т.п.)
-       - Формат: простая нумерованная строка на каждый раздел: [Название](url)
-       - Пример: 1. [О компании](https://site.ru/about)  2. [Продукция](https://site.ru/products)
-       - URL — ТОЛЬКО из ответа ExtractSiteLinks. ЗАПРЕЩЕНО придумывать
+       - Вызови ExtractSiteLinks для {company_url}. Если ошибка — вызови ExtractLinksWithPlaywright
+       - Выбери ДО 10 ОСНОВНЫХ разделов. Включай ТОЛЬКО те, чей URL есть в ответе
+       - Копируй URL ДОСЛОВНО. НЕ придумывай пути
      
     Ссылки: [описание](url). URL только из ответа инструмента. Максимум информации с каждой страницы.
     Если какая-то информация отсутствует на сайте, укажите это явно, но НЕ пытайтесь найти её в других источниках и НЕ придумывайте.""",
@@ -666,8 +779,8 @@ else:
     
     КРИТИЧЕСКИ ВАЖНО:
     1. ДЕТАЛИЗАЦИЯ: Каждый пункт — минимум 3–5 предложений. Конкретные данные, цифры, имена из Задач 1 и 2. Не опускайте информацию. Бедный короткий отчёт — ошибка.
-    2. ССЫЛКИ: В КОНЦЕ КАЖДОГО раздела (I–IX) — строка «Источники:» с кликабельными ссылками [описание](url). Только url из Задачи 1.
-    3. СТРУКТУРА САЙТА (раздел X): до 10 пунктов, формат [Название](url). Без вложенности.""",
+    2. ССЫЛКИ: Только проверенные! В «Источники» включай ТОЛЬКО url из Задачи 1 — копируй дословно. Несуществующие ссылки НЕ включай.
+    3. СТРУКТУРА САЙТА: до 10 пунктов из ответа ExtractSiteLinks. Только реальные [Название](url).""",
     
     expected_output="""Полный детальный корпоративный отчет. Каждый раздел — 3–5+ предложений + в конце «Источники:» со ссылками. Приложение: до 10 основных разделов [Название](url). Отчёт на русском.""",
     

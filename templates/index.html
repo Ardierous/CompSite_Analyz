@@ -16,17 +16,13 @@
         
         <div id="instrumentsBlock" class="instruments-block">
             <div class="instruments-list">
-                <button type="button" class="instrument-btn" id="btnMdToDocx" data-engine="pandoc">
-                    <span class="instrument-icon">📄</span>
-                    <span class="instrument-label">MD → DOCX (Pandoc)</span>
-                </button>
-                <button type="button" class="instrument-btn" id="btnMdToDocxCustom" data-engine="custom">
-                    <span class="instrument-icon">📄</span>
-                    <span class="instrument-label">MD → DOCX (свой алгоритм)</span>
-                </button>
                 <button type="button" class="instrument-btn" id="btnAnalysis" disabled title="Требуется вход">
                     <span class="instrument-icon">🌐</span>
                     <span class="instrument-label">Анализ корпоративного сайта</span>
+                </button>
+                <button type="button" class="instrument-btn" id="btnUsefulTools">
+                    <span class="instrument-icon">🛠</span>
+                    <span class="instrument-label">Полезные инструменты</span>
                 </button>
             </div>
         </div>
@@ -42,7 +38,7 @@
                         <input 
                             type="text" 
                             id="urlInput" 
-                            placeholder="https://example.com" 
+                            placeholder="example.com" 
                             required
                             autocomplete="off"
                         >
@@ -119,6 +115,23 @@
                         <button type="button" id="adminCloseBtn" class="tools-close-btn">Закрыть</button>
                     </div>
                 </div>
+            </div>
+        </div>
+        <!-- Модальное окно «Полезные инструменты» -->
+        <div id="usefulToolsModalOverlay" class="tool-modal-overlay" style="display: none;" aria-hidden="true">
+            <div class="tool-modal" role="dialog" aria-labelledby="usefulToolsModalTitle">
+                <h3 id="usefulToolsModalTitle" class="tool-modal-title">Полезные инструменты</h3>
+                <div class="useful-tools-list">
+                    <button type="button" class="instrument-btn useful-tool-item" id="btnMdToDocxFromModal" data-engine="pandoc">
+                        <span class="instrument-icon">📄</span>
+                        <span class="instrument-label">MD → DOCX (Pandoc)</span>
+                    </button>
+                    <button type="button" class="instrument-btn useful-tool-item" id="btnMdToDocxCustomFromModal" data-engine="custom">
+                        <span class="instrument-icon">📄</span>
+                        <span class="instrument-label">MD → DOCX (свой алгоритм)</span>
+                    </button>
+                </div>
+                <button type="button" id="usefulToolsCloseBtn" class="tools-close-btn">Закрыть</button>
             </div>
         </div>
         <div id="toolModalOverlay" class="tool-modal-overlay" style="display: none;" aria-hidden="true" data-engine="pandoc">

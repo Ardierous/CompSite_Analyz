@@ -15,7 +15,7 @@ ENV PYTHONUNBUFFERED=1 \
     FLASK_PORT=5000 \
     FLASK_DEBUG=False
 
-# Устанавливаем Pandoc для MD → DOCX (кнопка «MD → DOCX»)
+# Устанавливаем Pandoc для MD → DOCX
 RUN apt-get update && apt-get install -y --no-install-recommends pandoc && \
     rm -rf /var/lib/apt/lists/* && \
     pandoc --version
@@ -41,6 +41,13 @@ RUN pip install --no-cache-dir --upgrade pip && \
     python -c "from crewai import Agent, Task, Crew, Process; print('✓ CrewAI основные модули импортированы')" && \
     python -c "from crewai_tools import ScrapeWebsiteTool; print('✓ CrewAI tools доступны')" 2>/dev/null || (echo "⚠️  CrewAI tools не установлены" && pip install --no-cache-dir "crewai[tools]>=0.11.2" && python -c "from crewai_tools import ScrapeWebsiteTool; print('✓ CrewAI tools установлены')") && \
     echo "✓ Все зависимости установлены успешно"
+
+# Playwright + Chromium для VPS/Linux (скрапинг сайтов с защитой)
+ENV PLAYWRIGHT_BROWSERS_PATH=/app/playwright-browsers
+RUN mkdir -p /app/playwright-browsers && \
+    playwright install-deps chromium && \
+    playwright install chromium && \
+    chown -R appuser:appuser /app/playwright-browsers
 
 # Копируем остальные файлы проекта (исключая .env через .dockerignore)
 COPY . .

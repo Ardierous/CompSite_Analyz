@@ -17,9 +17,12 @@ const exportDocxBtn = document.getElementById('exportDocxBtn');
 const newAnalysisBtn = document.getElementById('newAnalysisBtn');
 const instrumentsBlock = document.getElementById('instrumentsBlock');
 const analysisSection = document.getElementById('analysisSection');
-const btnMdToDocx = document.getElementById('btnMdToDocx');
-const btnMdToDocxCustom = document.getElementById('btnMdToDocxCustom');
+const btnUsefulTools = document.getElementById('btnUsefulTools');
 const btnAnalysis = document.getElementById('btnAnalysis');
+const usefulToolsModalOverlay = document.getElementById('usefulToolsModalOverlay');
+const usefulToolsCloseBtn = document.getElementById('usefulToolsCloseBtn');
+const btnMdToDocxFromModal = document.getElementById('btnMdToDocxFromModal');
+const btnMdToDocxCustomFromModal = document.getElementById('btnMdToDocxCustomFromModal');
 const backToInstrumentsBtn = document.getElementById('backToInstrumentsBtn');
 const toolModalOverlay = document.getElementById('toolModalOverlay');
 const toolModalCloseBtn = document.getElementById('toolModalCloseBtn');
@@ -413,11 +416,41 @@ if (mdDocxPandocDefault) {
         setPostprocessSettingsEnabled(!mdDocxPandocDefault.checked);
     });
 }
-if (btnMdToDocx && toolModalOverlay) {
-    btnMdToDocx.addEventListener('click', () => openMdToDocxModal('pandoc'));
+// «Полезные инструменты» — открытие модалки
+if (btnUsefulTools && usefulToolsModalOverlay) {
+    btnUsefulTools.addEventListener('click', () => {
+        usefulToolsModalOverlay.style.display = 'flex';
+        usefulToolsModalOverlay.setAttribute('aria-hidden', 'false');
+    });
 }
-if (btnMdToDocxCustom && toolModalOverlay) {
-    btnMdToDocxCustom.addEventListener('click', () => openMdToDocxModal('custom'));
+if (usefulToolsCloseBtn && usefulToolsModalOverlay) {
+    usefulToolsCloseBtn.addEventListener('click', () => {
+        usefulToolsModalOverlay.style.display = 'none';
+        usefulToolsModalOverlay.setAttribute('aria-hidden', 'true');
+    });
+}
+if (usefulToolsModalOverlay) {
+    usefulToolsModalOverlay.addEventListener('click', (e) => {
+        if (e.target === usefulToolsModalOverlay) {
+            usefulToolsModalOverlay.style.display = 'none';
+            usefulToolsModalOverlay.setAttribute('aria-hidden', 'true');
+        }
+    });
+}
+// MD→DOCX из модалки «Полезные инструменты»
+if (btnMdToDocxFromModal && toolModalOverlay) {
+    btnMdToDocxFromModal.addEventListener('click', () => {
+        usefulToolsModalOverlay.style.display = 'none';
+        usefulToolsModalOverlay.setAttribute('aria-hidden', 'true');
+        openMdToDocxModal('pandoc');
+    });
+}
+if (btnMdToDocxCustomFromModal && toolModalOverlay) {
+    btnMdToDocxCustomFromModal.addEventListener('click', () => {
+        usefulToolsModalOverlay.style.display = 'none';
+        usefulToolsModalOverlay.setAttribute('aria-hidden', 'true');
+        openMdToDocxModal('custom');
+    });
 }
 
 // Кнопка «Анализ корпоративного сайта» — показываем секцию анализа
