@@ -677,7 +677,7 @@ if (mdFileInput) {
                 return;
             }
             const name = response.headers.get('content-disposition');
-            let filename = (file.name || 'document').replace(/\.md$/i, '') + '_converted.docx';
+            let filename = (file.name || 'document').replace(/\.[^/.]+$/, '') + '_converted.docx';
             if (name && name.includes('filename=')) {
                 const m = name.match(/filename\*?=(?:UTF-8'')?([^'";\n]+)/i) || name.match(/filename=['"]?([^'";\n]+)/);
                 if (m) {

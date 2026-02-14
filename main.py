@@ -499,6 +499,8 @@ _RE_INLINE = re.compile(
     r'\[\^[^\]]+\]|\[[^\]]{1,200}\]\([^)]{1,1500}\)|[^*`~\[]+)'
 )
 _RE_LINK = re.compile(r'\[([^\]]+)\]\(([^)]+)\)')
+# Голые URL (http/https/www) для кликабельных ссылок
+_RE_BARE_URL = re.compile(r'(https?://[^\s\)\]<>"\']+|www\.[^\s\)\]<>"\']+)')
 _RE_FOOTNOTE_REF = re.compile(r'\[\^([^\]]+)\]')
 _RE_FOOTNOTE_DEF = re.compile(r'^\[\^([^\]]+)\]:\s*(.*)$')
 
@@ -530,13 +532,32 @@ def _apply_backslash_escapes(text):
     return ''.join(result)
 
 
+def _split_and_add_with_bare_urls(paragraph, text):
+    """Разбивает текст по голым URL и добавляет в параграф; URL делаются кликабельными."""
+    if not text or not _RE_BARE_URL.search(text):
+        _add_run_with_emoji_font(paragraph, text)
+        return
+    last = 0
+    for m in _RE_BARE_URL.finditer(text):
+        if m.start() > last:
+            _add_run_with_emoji_font(paragraph, text[last:m.start()])
+        url = _normalize_url(m.group(1))
+        _add_hyperlink(paragraph, m.group(1), url)
+        last = m.end()
+    if last < len(text):
+        _add_run_with_emoji_font(paragraph, text[last:])
+
+
 def _add_inline_formatted(paragraph, text, footnote_ctx=None):
     """Добавляет в параграф текст с поддержкой **/__ жирный, */_ курсив, `код`, ~~зачёркнутый~~, [текст](url), [^id] сноски; экранирование \\; картинки → подпись."""
     text = _replace_md_images(text)
     text = _apply_backslash_escapes(text)
     # Быстрый путь: нет спецсимволов — один add_run без regex (с разбивкой по эмодзи)
     if '*' not in text and '_' not in text and '`' not in text and '~' not in text and '[' not in text:
-        _add_run_with_emoji_font(paragraph, text)
+        if 'http' in text or 'www.' in text:
+            _split_and_add_with_bare_urls(paragraph, text)
+        else:
+            _add_run_with_emoji_font(paragraph, text)
         return
     # Защита: много * или _ — возможен тяжёлый backtracking, добавляем как текст
     if text.count('*') > 40 or text.count('_') > 40:
@@ -593,11 +614,14 @@ def _add_inline_formatted(paragraph, text, footnote_ctx=None):
                 if link_text:
                     _add_hyperlink(paragraph, link_text, m.group(2))
                 else:
-                    _add_run_with_emoji_font(paragraph, m.group(2))
+                    _add_hyperlink(paragraph, m.group(2), m.group(2))
             else:
                 _add_run_with_emoji_font(paragraph, part)
+        elif part.startswith(('http://', 'https://', 'www.')):
+            url = _normalize_url(part.rstrip('.,;:!?'))
+            _add_hyperlink(paragraph, part, url)
         else:
-            _add_run_with_emoji_font(paragraph, part)
+            _split_and_add_with_bare_urls(paragraph, part)
 
 
 def _normalize_task_list_text(text):
@@ -745,6 +769,7 @@ def _md_to_docx_content(doc, md_text, spacing=None, options=None):
             h_style = doc.styles[f'Heading {level}']
             h_style.font.name = 'Segoe UI'
             h_style.font.size = Pt(size_pt)
+            h_style.paragraph_format.alignment = WD_ALIGN_PARAGRAPH.LEFT
             h_style.paragraph_format.space_before = Pt(def_pt(spacing, f'heading{level}', 'before'))
             h_style.paragraph_format.space_after = Pt(def_pt(spacing, f'heading{level}', 'after'))
         except KeyError:
@@ -880,10 +905,23 @@ def _md_to_docx_content(doc, md_text, spacing=None, options=None):
             i = j
             last_type = 'code'
             continue
+        # Заголовки раздела I. II. III. (римские цифры) — как Heading 1
+        rm = re.match(r'^(I|II|III|IV|V|VI|VII|VIII|IX|X)\.\s+(.+)$', stripped, re.IGNORECASE)
+        if rm:
+            head_text = rm.group(2).strip()
+            if head_text:
+                p_h = doc.add_heading(head_text, level=1)
+                p_h.clear()
+                _add_inline_formatted(p_h, head_text, footnote_ctx)
+                for run in p_h.runs:
+                    run.font.size = Pt(16)
+                i += 1
+                last_type = 'heading'
+                continue
         # Заголовки # ## ### — с поддержкой bold, ссылок и т.д.
         m = re.match(r'^(#{1,6})\s+(.+)$', stripped)
         if m:
-            level = 1 if len(m.group(1)) <= 2 else 2
+            level = min(len(m.group(1)), 4)
             head_text = m.group(2).strip()
             p_h = doc.add_heading(head_text, level=level)
             p_h.clear()
@@ -1228,71 +1266,55 @@ try:
         f.write(json.dumps({"sessionId":"debug-session","runId":"init","hypothesisId":"E","location":"main.py:64","message":"Попытка импорта Agents_crew","data":{"timestamp":__import__('datetime').datetime.now().isoformat()}})+'\n')
 except: pass
 # #endregion
-# Проверяем, что это дочерний процесс Flask reloader (рабочий сервер)
-# WERKZEUG_RUN_MAIN устанавливается Flask только в дочернем процессе
-# В основном процессе не импортируем crew, чтобы избежать ошибок
+# Для блока if __name__ (reloader, PID и т.д.)
 is_werkzeug_main = os.environ.get('WERKZEUG_RUN_MAIN') == 'true'
-FLASK_DEBUG = os.getenv('FLASK_DEBUG', 'True').lower() == 'true'
 
-# Импортируем crew только в дочернем процессе или если debug отключен
-if is_werkzeug_main or not FLASK_DEBUG:
+# CrewAI — отложенная загрузка (при первом анализе), чтобы приложение запускалось даже при ошибках
+crew = None
+CREW_AVAILABLE = None
+_crew_load_error = None
+
+print("ℹ CrewAI загружается при первом анализе (отложенная инициализация)")
+
+
+def _load_crew():
+    """Загружает CrewAI при первом использовании. Возвращает (crew, error_msg)."""
+    global crew, CREW_AVAILABLE, _crew_load_error
+    if CREW_AVAILABLE is True and crew is not None:
+        return crew, None
+    if _crew_load_error and CREW_AVAILABLE is False:
+        return None, _crew_load_error
     try:
-        from Agents_crew import crew
-        # #region agent log
-        try:
-            with open(debug_log_path, 'a', encoding='utf-8') as f:
-                f.write(json.dumps({"sessionId":"debug-session","runId":"init","hypothesisId":"E","location":"main.py:72","message":"Agents_crew импортирован","data":{"crew_is_none":crew is None,"crew_type":str(type(crew)) if crew else None,"timestamp":__import__('datetime').datetime.now().isoformat()}})+'\n')
-        except: pass
-        # #endregion
+        from Agents_crew import crew as c
+        crew = c
         if crew is None:
-            error_msg = "CrewAI не доступен. Проверьте установку зависимостей."
-            logger.error(error_msg)
-            print(f"ОШИБКА: {error_msg}")
-            print("\nДиагностика:")
-            # Проверяем, что именно пошло не так
-            try:
-                from Agents_crew import CREWAI_IMPORTED
-                if not CREWAI_IMPORTED:
-                    print("  ❌ CrewAI модуль не импортирован")
-                    print("  Решение: pip install 'crewai[tools]>=0.11.2'")
-                else:
-                    print("  ⚠️  CrewAI импортирован, но объект crew не создан")
-                    print("  Возможные причины:")
-                    print("    - Ошибка при создании агентов")
-                    print("    - Ошибка при создании задач")
-                    print("    - Ошибка при создании Crew объекта")
-                    print("  Запустите: python check_crewai.py для детальной диагностики")
-            except:
-                pass
-            print("\nПроверьте логи выше для детальной информации об ошибке.")
             CREW_AVAILABLE = False
-        else:
-            CREW_AVAILABLE = True
-            logger.info("CrewAI успешно импортирован и инициализирован")
-            print("✓ CrewAI успешно инициализирован")
+            _crew_load_error = (
+                "CrewAI не инициализирован. Выполните:\n"
+                "  pip install --upgrade \"crewai[tools]>=0.80\" \"pydantic>=2.10\"\n"
+                "  python check_crewai.py"
+            )
+            return None, _crew_load_error
+        CREW_AVAILABLE = True
+        _crew_load_error = None
+        logger.info("CrewAI успешно загружен")
+        return crew, None
     except ImportError as e:
-        error_msg = f"Could not import crew: {e}"
-        logger.error(error_msg, exc_info=True)
-        print(f"ОШИБКА: {error_msg}")
-        print("Возможные причины:")
-        print("  1. CrewAI не установлен: pip install crewai>=0.11.2")
-        print("  2. Отсутствуют зависимости CrewAI")
-        print("  3. Проблема с импортом модуля Agents_crew.py")
         CREW_AVAILABLE = False
-        crew = None
+        _crew_load_error = (
+            f"CrewAI не установлен: {e}\n"
+            "Решение: pip install --upgrade \"crewai[tools]>=0.80\" \"pydantic>=2.10\""
+        )
+        logger.error(_crew_load_error)
+        return None, _crew_load_error
     except Exception as e:
-        error_msg = f"Ошибка при инициализации CrewAI: {e}"
-        logger.error(error_msg, exc_info=True)
-        print(f"ОШИБКА: {error_msg}")
-        import traceback
-        print("Детальная информация об ошибке:")
-        traceback.print_exc()
         CREW_AVAILABLE = False
-        crew = None
-else:
-    # В основном процессе Flask reloader не импортируем crew
-    CREW_AVAILABLE = True  # Устанавливаем True, чтобы приложение запустилось
-    crew = None  # crew будет импортирован в дочернем процессе
+        _crew_load_error = (
+            f"Ошибка CrewAI: {e}\n"
+            "Попробуйте: pip install --upgrade \"crewai[tools]>=0.80\" \"pydantic>=2.10\""
+        )
+        logger.error(_crew_load_error, exc_info=True)
+        return None, _crew_load_error
 
 app = Flask(__name__)
 CORS(app)
@@ -1390,6 +1412,14 @@ def analyze():
     except Exception:
         return jsonify({'error': 'Некорректный URL'}), 400
     
+    # Проверка доступности CrewAI до создания задачи
+    _c, _err = _load_crew()
+    if _c is None:
+        hint = ' Выполните: pip install --upgrade "crewai[tools]>=0.80" "pydantic>=2.10"'
+        return jsonify({
+            'error': 'CrewAI не доступен.' + hint
+        }), 503
+    
     # Генерируем уникальный ID для задачи
     task_id = datetime.now().strftime('%Y%m%d%H%M%S%f')
     
@@ -1466,18 +1496,11 @@ def run_analysis(task_id, company_url, initial_balance=None):
             }
             logger.warning(f"[{task_id}] Задача создана в run_analysis (не должна была отсутствовать)")
         
-        if not CREW_AVAILABLE:
-            error_msg = "CrewAI не доступен. Проверьте установку зависимостей."
-            logger.error(f"[{task_id}] {error_msg}")
-            # Попробуем импортировать еще раз для диагностики
-            try:
-                import crewai
-                logger.info(f"CrewAI модуль найден, версия: {crewai.__version__ if hasattr(crewai, '__version__') else 'неизвестна'}")
-            except ImportError as e:
-                logger.error(f"CrewAI модуль не установлен: {e}")
-            except Exception as e:
-                logger.error(f"Ошибка при проверке CrewAI: {e}")
-            raise Exception(error_msg)
+        _crew, err = _load_crew()
+        if _crew is None:
+            msg = (err or "CrewAI не доступен.").split('\n')[0]
+            logger.error(f"[{task_id}] {msg}")
+            raise Exception(msg)
         
         # Проверяем доступность сайта с правильными заголовками
         try:
@@ -1634,7 +1657,7 @@ def run_analysis(task_id, company_url, initial_balance=None):
         })
         # #endregion
         
-        result = crew.kickoff(inputs=inputs)
+        result = _crew.kickoff(inputs=inputs)
         
         # Останавливаем поток обновления прогресса
         progress_thread_running.clear()
@@ -1792,49 +1815,10 @@ def export_to_docx(task_id):
         pf_header.space_before = Pt(0)
         pf_header.space_after = Pt(0)
         
-        # Основной контент — схлопываем пустые строки, распознаём списки и эмодзи-буллиты
+        # Основной контент — полный разбор Markdown с кликабельными ссылками
         content = result_data.get('result', '')
         if content:
-            lines = content.replace('\r\n', '\n').replace('\r', '\n').split('\n')
-            i = 0
-            while i < len(lines):
-                line = lines[i]
-                stripped = line.strip()
-                if not stripped:
-                    j = i + 1
-                    while j < len(lines) and not lines[j].strip():
-                        j += 1
-                    # Пустая строка внутри основного контента: одна, без внешних отступов
-                    if len(doc.paragraphs) > 6:
-                        p_blank_body = doc.add_paragraph()
-                        pf_body = p_blank_body.paragraph_format
-                        pf_body.space_before = Pt(0)
-                        pf_body.space_after = Pt(0)
-                    i = j
-                    continue
-                if (len(stripped) < 100 and
-                    (stripped.isupper() or stripped.startswith('#') or
-                     any(stripped.startswith(m) for m in ['I.', 'II.', 'III.', 'IV.', 'V.', 'VI.', 'VII.', 'VIII.', 'IX.', 'X.']))):
-                    doc.add_heading(stripped, level=1)
-                elif re.match(r'^[-*]\s+', stripped):
-                    text = _strip_leading_bullet_chars(re.sub(r'^[-*]\s+', '', stripped))
-                    p = doc.add_paragraph(style='List Bullet')
-                    pf_list = p.paragraph_format
-                    pf_list.space_before = Pt(0)
-                    pf_list.space_after = Pt(0)
-                    p.add_run(text)
-                else:
-                    is_emoji_bullet, bullet, rest = _line_starts_with_emoji_bullet(stripped)
-                    if is_emoji_bullet and rest is not None:
-                        p = doc.add_paragraph(style='List Bullet')
-                        pf_list = p.paragraph_format
-                        pf_list.space_before = Pt(0)
-                        pf_list.space_after = Pt(0)
-                        p.add_run(_strip_leading_bullet_chars(rest))
-                        i += 1
-                        continue
-                    doc.add_paragraph(stripped)
-                i += 1
+            _md_to_docx_content(doc, content, spacing=None, options={'line_spacing': 1.15, 'main_font_size': 11})
         
         # Сохраняем в память
         file_stream = io.BytesIO()
@@ -1885,10 +1869,11 @@ def _postprocess_pandoc_docx(docx_bytes, spacing=None, options=None):
         s.paragraph_format.line_spacing = line_spacing
     except KeyError:
         pass
-    # Heading 1-4
+    # Heading 1-4: по левому краю
     for level, def_before, def_after in [(1, 12, 6), (2, 10, 4), (3, 8, 4), (4, 6, 2)]:
         try:
             s = doc.styles[f'Heading {level}']
+            s.paragraph_format.alignment = WD_ALIGN_PARAGRAPH.LEFT
             s.paragraph_format.space_before = Pt(def_pt(f'heading{level}', 'before') or def_before)
             s.paragraph_format.space_after = Pt(def_pt(f'heading{level}', 'after') or def_after)
         except KeyError:
@@ -1910,8 +1895,17 @@ def _postprocess_pandoc_docx(docx_bytes, spacing=None, options=None):
     return out.getvalue()
 
 
-def _convert_md_to_docx_pandoc(md_bytes, base_name):
-    """Конвертация MD → DOCX через Pandoc (стандартный алгоритм)."""
+_PANDOC_INPUT_FORMATS = {
+    '.md': 'markdown', '.markdown': 'markdown',
+    '.html': 'html', '.htm': 'html',
+    '.rst': 'rst', '.rest': 'rst',
+    '.tex': 'latex', '.latex': 'latex',
+    '.txt': 'markdown', '.text': 'markdown',
+}
+
+
+def _convert_md_to_docx_pandoc(md_bytes, base_name, input_format='markdown'):
+    """Конвертация в DOCX через Pandoc (MD, HTML, RST, TXT и др.)."""
     try:
         result = subprocess.run(['pandoc', '--version'], capture_output=True, text=True, timeout=5)
         if result.returncode != 0:
@@ -1921,12 +1915,14 @@ def _convert_md_to_docx_pandoc(md_bytes, base_name):
     except subprocess.TimeoutExpired:
         return None, 'Ошибка проверки Pandoc'
     with tempfile.TemporaryDirectory() as tmpdir:
-        md_path = Path(tmpdir) / 'input.md'
+        ext_map = {'markdown': '.md', 'html': '.html', 'rst': '.rst', 'latex': '.tex'}
+        ext = ext_map.get(input_format, '.md')
+        inp_path = Path(tmpdir) / ('input' + ext)
         docx_path = Path(tmpdir) / 'output.docx'
-        md_path.write_bytes(md_bytes)
+        inp_path.write_bytes(md_bytes)
         try:
             result = subprocess.run(
-                ['pandoc', '-f', 'markdown', '-t', 'docx', '-o', str(docx_path), str(md_path)],
+                ['pandoc', '-f', input_format, '-t', 'docx', '-o', str(docx_path), str(inp_path)],
                 capture_output=True,
                 text=True,
                 timeout=MD_DOCX_TIMEOUT,
@@ -1949,8 +1945,6 @@ def convert_md_to_docx_pandoc():
     uploaded = request.files.get('file')
     if not uploaded or uploaded.filename == '':
         return jsonify({'error': 'Файл не выбран'}), 400
-    if not (uploaded.filename.lower().endswith('.md') or (getattr(uploaded, 'content_type', '') or '').startswith('text/')):
-        return jsonify({'error': 'Требуется файл Markdown (.md)'}), 400
     try:
         md_bytes = uploaded.read()
         logger.info(f"POST /api/convert/md-to-docx-pandoc: файл прочитан, {len(md_bytes)} байт")
@@ -1966,9 +1960,11 @@ def convert_md_to_docx_pandoc():
             try:
                 md_text = md_bytes.decode('cp1251')
             except (UnicodeDecodeError, LookupError):
-                return jsonify({'error': 'Неподдерживаемая кодировка. Сохраните файл в UTF-8.'}), 400
+                return jsonify({'error': 'Неподдерживаемая кодировка. Файл должен быть текстовым (UTF-8).'}), 400
         md_bytes = md_text.encode('utf-8')
-    docx_bytes, err = _convert_md_to_docx_pandoc(md_bytes, Path(uploaded.filename).stem)
+    suf = Path(uploaded.filename).suffix.lower()
+    in_fmt = _PANDOC_INPUT_FORMATS.get(suf, 'markdown')
+    docx_bytes, err = _convert_md_to_docx_pandoc(md_bytes, Path(uploaded.filename).stem, in_fmt)
     if err:
         logger.warning(f"Pandoc конвертация: {err}")
         return jsonify({'error': err}), 500
@@ -2013,8 +2009,6 @@ def convert_md_to_docx():
     uploaded = request.files.get('file')
     if not uploaded or uploaded.filename == '':
         return jsonify({'error': 'Файл не выбран'}), 400
-    if not (uploaded.filename.lower().endswith('.md') or (getattr(uploaded, 'content_type', '') or '').startswith('text/')):
-        return jsonify({'error': 'Требуется файл Markdown (.md)'}), 400
     try:
         md_bytes = uploaded.read()
         logger.info(f"POST /api/convert/md-to-docx: файл прочитан, {len(md_bytes)} байт")
