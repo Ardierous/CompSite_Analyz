@@ -3,7 +3,7 @@ from flask_cors import CORS
 import os
 import threading
 from datetime import datetime
-from urllib.parse import urlparse, quote
+from urllib.parse import urlparse, quote, urljoin, urlunparse
 import warnings
 import io
 import requests
@@ -508,6 +508,138 @@ def _extract_urls_from_markdown(text):
     for m in _RE_BARE_URL.finditer(text):
         _add(m.group(1))
     return urls
+
+
+def _hostname_base(host):
+    if not host:
+        return ''
+    h = host.lower()
+    if h.startswith('www.'):
+        return h[4:]
+    return h
+
+
+def _canonical_url_key(url):
+    """Ключ URL для whitelist: хост без www, путь без лишнего слэша, query."""
+    u = _normalize_url((url or '').strip())
+    p = urlparse(u)
+    host = _hostname_base(p.hostname or '')
+    path = (p.path or '/').rstrip('/') or '/'
+    q = p.query or ''
+    return (host, path, q)
+
+
+def _expand_url_variants_for_verified_set(u):
+    """Варианты строки URL для множества verified_urls (www, слэш, http/https)."""
+    u = _normalize_url((u or '').strip())
+    out = {u} if u else set()
+    if not u.startswith(('http://', 'https://')):
+        return out
+    p = urlparse(u)
+    path = p.path or '/'
+    if u.endswith('/') and path not in ('', '/'):
+        out.add(u.rstrip('/'))
+    elif path not in ('', '/') and not u.endswith('/'):
+        out.add(u + '/')
+    net = p.netloc.lower()
+    if net.startswith('www.'):
+        alt = urlunparse((p.scheme, net[4:], p.path, '', p.query, ''))
+    else:
+        alt = urlunparse((p.scheme, 'www.' + net, p.path, '', p.query, ''))
+    out.add(_normalize_url(alt))
+    for s in tuple(out):
+        if s.startswith('https://'):
+            out.add('http://' + s[8:])
+        elif s.startswith('http://'):
+            out.add('https://' + s[7:])
+    return {x for x in out if x}
+
+
+def _discover_internal_site_urls(company_url, max_pages=24, timeout=12):
+    """
+    BFS по ссылкам того же домена: реальные пути из HTML (как в меню сайта).
+    Возвращает (множество ключей _canonical_url_key, множество строк для verified_urls).
+    """
+    try:
+        from bs4 import BeautifulSoup
+    except ImportError:
+        return set(), set()
+
+    headers = {
+        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+        'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
+        'Accept-Language': 'ru-RU,ru;q=0.9,en-US;q=0.8,en;q=0.7',
+        'Connection': 'keep-alive',
+    }
+    seed = _normalize_url(company_url)
+    base_host = _hostname_base((urlparse(seed).hostname or ''))
+    if not base_host:
+        return set(), set()
+
+    allowed_keys = set()
+    verified_strings = set()
+
+    def register_url(u):
+        u = _normalize_url(u)
+        allowed_keys.add(_canonical_url_key(u))
+        verified_strings.update(_expand_url_variants_for_verified_set(u))
+
+    queue = [seed]
+    queued_keys = {_canonical_url_key(seed)}
+    pages_fetched = 0
+
+    while queue and pages_fetched < max_pages:
+        url = queue.pop(0)
+        try:
+            r = requests.get(url, headers=headers, timeout=timeout, allow_redirects=True)
+        except requests.RequestException:
+            continue
+        pages_fetched += 1
+        if r.status_code >= 400:
+            continue
+        final = r.url
+        register_url(final)
+
+        ct = (r.headers.get('Content-Type') or '').lower()
+        if 'html' not in ct and not ct.startswith('text/') and 'application/xhtml' not in ct:
+            continue
+        try:
+            soup = BeautifulSoup(r.text, 'html.parser')
+        except Exception:
+            continue
+        for a in soup.find_all('a', href=True):
+            href = (a.get('href') or '').strip()
+            if not href or href.startswith(('#', 'javascript:', 'mailto:', 'tel:', 'data:')):
+                continue
+            abs_u = urljoin(final, href)
+            p = urlparse(abs_u)
+            if p.scheme not in ('http', 'https'):
+                continue
+            if _hostname_base(p.hostname or '') != base_host:
+                continue
+            clean = urlunparse((p.scheme, p.netloc, p.path, '', p.query, ''))
+            clean = _normalize_url(clean)
+            register_url(clean)
+            lk = _canonical_url_key(clean)
+            if lk not in queued_keys and len(queued_keys) < max_pages * 6:
+                queued_keys.add(lk)
+                queue.append(clean)
+
+    return allowed_keys, verified_strings
+
+
+def _sanitize_markdown_links(text, allowed_keys):
+    """Убирает markdown-ссылки [текст](url), если url нет в whitelist реальных путей."""
+    if not text or not allowed_keys:
+        return text
+
+    def repl(m):
+        label, url = m.group(1), m.group(2).strip()
+        if _canonical_url_key(url) in allowed_keys:
+            return m.group(0)
+        return label
+
+    return re.sub(r'\[([^\]]*)\]\(([^)]+)\)', repl, text)
 
 
 def _url_is_verified(url, verified_urls, company_url=None):
@@ -1758,17 +1890,42 @@ def run_analysis(task_id, company_url, initial_balance=None):
         # #endregion
         
         result = _crew.kickoff(inputs=inputs)
-        
-        # Извлекаем проверенные URL из Task 1 для фильтрации ссылок в DOCX
+        result_str = str(result)
+
+        # Реальные пути с сайта (HTML-обход) — whitelist для ссылок и снятие выдуманных [текст](url)
         verified_urls = set()
         try:
-            task1_path = Path(__file__).parent / 'tasks' / 'task_1_scraped_data.md'
-            if task1_path.exists():
-                task1_text = task1_path.read_text(encoding='utf-8', errors='replace')
-                verified_urls = _extract_urls_from_markdown(task1_text)
-                logger.info(f"[{task_id}] Извлечено {len(verified_urls)} проверенных URL из Task 1")
+            if task_id in analysis_status:
+                update_progress_safely(task_id, analysis_status[task_id].get('progress', 88), 'Проверка структуры ссылок сайта...')
+        except Exception:
+            pass
+        try:
+            allowed_keys, verified_from_crawl = _discover_internal_site_urls(company_url)
+            if allowed_keys:
+                result_str = _sanitize_markdown_links(result_str, allowed_keys)
+                verified_urls = verified_from_crawl
+                logger.info(
+                    f"[{task_id}] Обход сайта: {len(allowed_keys)} уникальных URL; "
+                    f"в отчёте оставлены только ссылки из реальной структуры"
+                )
+            else:
+                logger.warning(f"[{task_id}] Обход сайта не дал ссылок — whitelist только из Задачи 1 (слабее)")
+                task1_path = Path(__file__).parent / 'tasks' / 'task_1_scraped_data.md'
+                if task1_path.exists():
+                    task1_text = task1_path.read_text(encoding='utf-8', errors='replace')
+                    verified_urls = _extract_urls_from_markdown(task1_text)
+                    t1_keys = {_canonical_url_key(u) for u in verified_urls}
+                    result_str = _sanitize_markdown_links(result_str, t1_keys)
+                    logger.info(f"[{task_id}] Извлечено {len(verified_urls)} URL из Task 1 для фильтрации")
         except Exception as e:
-            logger.warning(f"[{task_id}] Не удалось извлечь URL из Task 1: {e}")
+            logger.warning(f"[{task_id}] Ошибка обхода/фильтра ссылок: {e}")
+            try:
+                task1_path = Path(__file__).parent / 'tasks' / 'task_1_scraped_data.md'
+                if task1_path.exists():
+                    task1_text = task1_path.read_text(encoding='utf-8', errors='replace')
+                    verified_urls = _extract_urls_from_markdown(task1_text)
+            except Exception:
+                pass
         
         # Останавливаем поток обновления прогресса
         progress_thread_running.clear()
@@ -1809,7 +1966,7 @@ def run_analysis(task_id, company_url, initial_balance=None):
         # Сохраняем результат
         update_progress_safely(task_id, 96, 'Сохранение результатов...')
         analysis_results[task_id] = {
-            'result': str(result),
+            'result': result_str,
             'url': company_url,
             'company_name': company_name,
             'timestamp': datetime.now().isoformat(),
