@@ -1,0 +1,17 @@
+# TLS и продление — встроенный ACME Caddy (Let’s Encrypt). Ручные cert/key не используются.
+
+www.iibox.ru {
+	redir https://iibox.ru{uri} permanent
+}
+
+iibox.ru {
+	encode zstd gzip
+	reverse_proxy app:5000
+
+	header {
+		Strict-Transport-Security "max-age=31536000; includeSubDomains; preload"
+		X-Content-Type-Options "nosniff"
+		X-Frame-Options "SAMEORIGIN"
+		Referrer-Policy "strict-origin-when-cross-origin"
+	}
+}

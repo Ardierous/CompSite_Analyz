@@ -7,6 +7,8 @@ import os
 import subprocess
 import sys
 import re
+import time
+import socket
 from pathlib import Path
 from datetime import datetime
 
@@ -33,6 +35,27 @@ def run_command(cmd, check=True):
         sys.exit(1)
     
     return result.returncode == 0
+
+def run_command_with_result(cmd):
+    """Выполняет команду и возвращает (ok, completed_process)."""
+    print(f"\n{'='*60}")
+    print(f"Выполняется: {cmd}")
+    print(f"{'='*60}\n")
+    result = subprocess.run(
+        cmd,
+        shell=True,
+        check=False,
+        capture_output=True,
+        text=True,
+        encoding='utf-8',
+        errors='replace',
+        cwd=PROJECT_ROOT
+    )
+    if result.stdout:
+        print(result.stdout, end='' if result.stdout.endswith('\n') else '\n')
+    if result.stderr:
+        print(result.stderr, end='' if result.stderr.endswith('\n') else '\n')
+    return result.returncode == 0, result
 
 def normalize_docker_name(name):
     """
@@ -162,6 +185,90 @@ def get_docker_info():
     
     return docker_username, docker_repo, docker_tag
 
+def docker_login_with_prompt(docker_username):
+    """Интерактивный логин в Docker Hub."""
+    print("\n🔐 Вход в Docker Hub...")
+    print("Введите ваш Docker Hub пароль (или токен доступа):")
+    return run_command(f"docker login -u {docker_username}")
+
+def _can_resolve_host(hostname):
+    """Проверяет, резолвится ли hostname через системный DNS."""
+    try:
+        socket.getaddrinfo(hostname, 443)
+        return True
+    except socket.gaierror:
+        return False
+    except Exception:
+        return False
+
+def dockerhub_preflight():
+    """Preflight-проверка сетевой доступности Docker Hub до push."""
+    print("\n🌐 Preflight: проверка DNS Docker Hub...")
+    hosts = ["registry-1.docker.io", "auth.docker.io", "index.docker.io"]
+    failed = [h for h in hosts if not _can_resolve_host(h)]
+    if failed:
+        print("❌ DNS проблема: не удалось разрешить:")
+        for h in failed:
+            print(f"   - {h}")
+        print("💡 Что сделать:")
+        print("   1) ipconfig /flushdns")
+        print("   2) Перезапустить Docker Desktop")
+        print("   3) Настроить DNS в Docker Engine: 1.1.1.1, 8.8.8.8")
+        print("   4) Проверить VPN/прокси/антивирусный HTTPS-фильтр")
+        return False
+    print("✅ DNS Docker Hub доступен")
+    return True
+
+def should_retry_push(stderr_text):
+    """Определяет, стоит ли повторять push (сетевые/временные ошибки реестра)."""
+    s = (stderr_text or "").lower()
+    retry_markers = [
+        "unexpected status from put request",
+        "failed commit on ref",
+        "400 bad request",
+        "500 internal server error",
+        "502 bad gateway",
+        "503 service unavailable",
+        "504 gateway timeout",
+        "tls handshake timeout",
+        "i/o timeout",
+        "connection reset by peer",
+        "eof",
+        "context deadline exceeded",
+        "toomanyrequests",
+        "429",
+    ]
+    return any(m in s for m in retry_markers)
+
+def push_with_retries(image_name, retries=4, base_delay_sec=4):
+    """Публикует docker image с ретраями и backoff."""
+    for attempt in range(1, retries + 1):
+        print(f"\n📤 Попытка push {attempt}/{retries}: {image_name}")
+        ok, result = run_command_with_result(f"docker push {image_name}")
+        if ok:
+            print(f"✅ Push успешен: {image_name}")
+            return True
+
+        stderr_text = (result.stderr or "") + "\n" + (result.stdout or "")
+        lowered = stderr_text.lower()
+        if "no such host" in lowered or "lookup registry-1.docker.io" in lowered:
+            print("❌ DNS ошибка: registry-1.docker.io не резолвится.")
+            print("💡 Остановлено без ретраев, т.к. сеть недоступна.")
+            print("   Выполните: ipconfig /flushdns, перезапустите Docker Desktop и повторите.")
+            return False
+        if attempt < retries and should_retry_push(stderr_text):
+            delay = base_delay_sec * (2 ** (attempt - 1))
+            print(f"⚠️ Временная ошибка реестра/сети. Повтор через {delay} сек...")
+            time.sleep(delay)
+            continue
+
+        print(f"❌ Push не выполнен: {image_name}")
+        if "unexpected status from put request" in stderr_text.lower() or "failed commit on ref" in stderr_text.lower():
+            print("💡 Похоже на сбой commit upload-сессии в Docker Hub.")
+            print("   Рекомендуется: docker logout && docker login, затем повторить push.")
+        return False
+    return False
+
 def main():
     """Основная функция"""
     print("="*60)
@@ -200,25 +307,27 @@ def main():
     
     # Шаг 2: Вход в Docker Hub
     print("\n🔐 Шаг 2: Вход в Docker Hub...")
-    print("Введите ваш Docker Hub пароль (или токен доступа):")
-    login_cmd = f"docker login -u {docker_username}"
-    if not run_command(login_cmd):
+    if not docker_login_with_prompt(docker_username):
         print("❌ Ошибка при входе в Docker Hub!")
         sys.exit(1)
     
     print("✅ Успешный вход в Docker Hub!")
+
+    # Шаг 2.5: Preflight сети/DNS перед push
+    if not dockerhub_preflight():
+        sys.exit(1)
     
     # Шаг 3: Публикация образа
     print("\n📤 Шаг 3: Публикация образа на Docker Hub...")
     
     # Публикуем с тегом
-    if not run_command(f"docker push {image_name}"):
+    if not push_with_retries(image_name, retries=4, base_delay_sec=4):
         print("❌ Ошибка при публикации образа с тегом!")
         sys.exit(1)
     
     # Публикуем latest, если тег не latest
     if docker_tag != 'latest':
-        if not run_command(f"docker push {image_name_latest}"):
+        if not push_with_retries(image_name_latest, retries=3, base_delay_sec=4):
             print("⚠️  Предупреждение: не удалось опубликовать latest тег")
     
     print("✅ Образ успешно опубликован на Docker Hub!")

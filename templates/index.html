@@ -4,14 +4,18 @@
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>Подручные инструменты AI-тишника</title>
-    <link rel="icon" href="{{ url_for('static', filename='favicon.svg') }}" type="image/svg+xml">
+    <link rel="icon" type="image/png" href="{{ url_for('static', filename='site-logo.png', v='1') }}">
+    <link rel="shortcut icon" href="{{ url_for('static', filename='site-logo.png', v='1') }}">
     <link rel="stylesheet" href="{{ url_for('static', filename='style.css') }}">
 </head>
 <body>
     <div class="container">
         <div class="header header-with-entry">
-            <h1>Подручные инструменты<br>AI-тишника</h1>
-            <button type="button" class="entry-btn" id="entryBtn" title="Вход">Вход</button>
+            <div class="header-bar">
+                <img class="header-logo" src="{{ url_for('static', filename='header-logo.png', v='1') }}" width="72" height="72" alt="IIBOX" decoding="async">
+                <h1 class="header-main-title">Подручные инструменты<br>AI-тишника</h1>
+                <button type="button" class="entry-btn" id="entryBtn" title="Вход">Вход</button>
+            </div>
         </div>
         
         <div id="instrumentsBlock" class="instruments-block">

@@ -1,0 +1,47 @@
+# Продакшен: приложение + Caddy (HTTPS Let’s Encrypt, HTTP→HTTPS, www→apex).
+# Запуск из корня репозитория: docker compose pull && docker compose up -d
+# См. HTTPS.md
+
+networks:
+  web:
+    driver: bridge
+
+services:
+  app:
+    image: avardous/comp_site_analyz:latest
+    container_name: comp-site-app
+    networks:
+      - web
+    expose:
+      - "5000"
+    environment:
+      - FLASK_ENV=production
+      - FLASK_DEBUG=False
+      - FLASK_HOST=0.0.0.0
+      - FLASK_PORT=5000
+      - PYTHONUNBUFFERED=1
+    env_file:
+      - .env
+    restart: unless-stopped
+    ipc: host
+
+  caddy:
+    image: caddy:2-alpine
+    container_name: comp-site-caddy
+    networks:
+      - web
+    depends_on:
+      - app
+    ports:
+      - "80:80"
+      - "443:443"
+      - "443:443/udp"
+    volumes:
+      - ./Caddyfile:/etc/caddy/Caddyfile:ro
+      - caddy_data:/data
+      - caddy_config:/config
+    restart: unless-stopped
+
+volumes:
+  caddy_data:
+  caddy_config:

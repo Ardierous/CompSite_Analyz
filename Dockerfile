@@ -49,8 +49,10 @@ RUN mkdir -p /app/playwright-browsers && \
     playwright install chromium && \
     chown -R appuser:appuser /app/playwright-browsers
 
-# Копируем остальные файлы проекта (исключая .env через .dockerignore)
-COPY . .
+# Приложение: Python-модули, шаблоны и статика (включая favicon) — явно в образе
+COPY main.py Agents_crew.py logger.py cost_tracker.py check_crewai.py ./
+COPY templates/ ./templates/
+COPY static/ ./static/
 
 # Убеждаемся, что .env не попал в образ (дополнительная проверка)
 RUN if [ -f .env ]; then rm -f .env; fi

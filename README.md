@@ -88,6 +88,7 @@ Company/
 ├── templates/
 │   └── index.html         # Главная страница
 └── static/
+    ├── site-logo.png      # Иконка вкладки браузера (favicon)
     ├── style.css          # Стили интерфейса
     └── script.js          # Логика фронтенда
 ```
@@ -146,11 +147,11 @@ Company/
 
 5. **Настройте переменные окружения:**
 
-   Создайте файл `.env` в корне проекта (используйте `env.example` как шаблон):
+   Создайте файл `.env` в корне проекта (шаблон: `env.example` или `.env.example` для HTTPS-стека в корне):
 
    ```bash
-   # Скопируйте пример файла
    cp env.example .env
+   # или: cp .env.example .env
    ```
 
    Затем отредактируйте `.env` и укажите свои значения:
@@ -277,6 +278,21 @@ docker run -d \
   avardous/comp_site_analyz:latest
 ```
 
+#### Вариант 1.1: HTTPS через Caddy (продакшен, домен iibox.ru)
+
+В корне репозитория: `docker-compose.yml`, `Caddyfile`, `.env.example`. Подробные шаги, DNS и проверки — в **[HTTPS.md](HTTPS.md)**.
+
+Кратко:
+
+```bash
+cp .env.example .env
+# заполните OPENAI_API_KEY и при необходимости настройки Flask
+docker compose pull
+docker compose up -d
+```
+
+Домены и редирект **www → iibox.ru** заданы в `Caddyfile`. Для другого домена отредактируйте `Caddyfile`.
+
 #### Вариант 2: Локальная сборка для разработки
 
 1. **Соберите Docker образ:**
@@ -305,6 +321,7 @@ docker run -d \
 
 **Примечания:**
 
+- Статика и шаблоны (в том числе `static/site-logo.png` для иконки вкладки) попадают в образ на этапе `docker build`. После смены иконки или вёрстки достаточно пересобрать образ и перезапустить контейнер (или подтянуть новый тег с Docker Hub) — правки внутри уже запущенного контейнера вручную, в том числе через `docker cp`, не требуются. При смене файла иконки обновите параметр `v=` в `templates/index.html`, чтобы сбросить кэш браузера.
 - Docker автоматически использует Python 3.11 из официального образа `python:3.11-slim`
 - `scripts/docker-compose.yml` настроен для разработки с hot reload (изменения применяются автоматически)
 - `scripts/docker-compose.prod.yml` использует опубликованный образ из Docker Hub; для стабильности Chromium при скрапинге задано `ipc: host`

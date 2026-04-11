@@ -5,17 +5,22 @@ echo 🚀 Публикация Docker образа на Docker Hub
 echo ============================================================
 echo.
 
-REM Проверка наличия Python
-python --version >nul 2>&1
-if errorlevel 1 (
-    echo ❌ Python не найден! Установите Python для запуска скрипта.
-    pause
-    exit /b 1
-)
-
-REM Запуск Python скрипта из папки scripts
+REM Переходим в папку scripts
 cd /d "%~dp0"
-python push_to_dockerhub.py
+
+REM Проверяем py launcher (предпочтительно) и python (fallback)
+py -3.11 --version >nul 2>&1
+if %errorlevel%==0 (
+    py -3.11 -u push_to_dockerhub.py
+) else (
+    python --version >nul 2>&1
+    if errorlevel 1 (
+        echo ❌ Python/py launcher не найден! Установите Python 3.11 для запуска скрипта.
+        pause
+        exit /b 1
+    )
+    python -u push_to_dockerhub.py
+)
 
 pause
 
