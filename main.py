@@ -1556,29 +1556,20 @@ FLASK_HOST = os.getenv('FLASK_HOST', '0.0.0.0')
 FLASK_PORT = int(os.getenv('FLASK_PORT', 5000))
 FLASK_DEBUG = os.getenv('FLASK_DEBUG', 'True').lower() == 'true'
 
-# Скрытый режим администратора: пароль для доступа к анализу сайта
-ADMIN_KEY = '123654+'  # Код для входа в режим смены пароля
-PASSWORD_FILE = Path(__file__).parent / 'data' / '.admin_password'
-DEFAULT_PASSWORD = '111'
-
-
-def _ensure_password_file():
-    """Создаёт директорию data и файл пароля с дефолтным значением, если их нет."""
-    PASSWORD_FILE.parent.mkdir(parents=True, exist_ok=True)
-    if not PASSWORD_FILE.exists():
-        PASSWORD_FILE.write_text(DEFAULT_PASSWORD, encoding='utf-8')
+# Скрытый режим администратора: пароль для доступа к анализу сайта.
+# Единый источник пароля — только APP_ACCESS_PASSWORD из окружения.
+ADMIN_KEY = (os.getenv('ADMIN_KEY') or '123654+').strip()  # Код для входа в режим смены пароля
+ENV_ACCESS_PASSWORD = (os.getenv('APP_ACCESS_PASSWORD') or '').strip()
 
 
 def get_stored_password():
-    """Возвращает сохранённый пароль для доступа к анализу сайта."""
-    _ensure_password_file()
-    return PASSWORD_FILE.read_text(encoding='utf-8').strip()
+    """Возвращает пароль для доступа к анализу сайта."""
+    return ENV_ACCESS_PASSWORD
 
 
 def set_stored_password(new_password):
-    """Сохраняет новый пароль (только при вызове с известным ADMIN_KEY)."""
-    _ensure_password_file()
-    PASSWORD_FILE.write_text(new_password.strip(), encoding='utf-8')
+    """Пароль не меняется через API: используется только APP_ACCESS_PASSWORD в окружении."""
+    raise RuntimeError('Смена пароля через API отключена. Измените APP_ACCESS_PASSWORD и перезапустите приложение.')
 
 
 # Хранилище результатов анализа (в продакшене использовать Redis или БД)
@@ -1597,6 +1588,8 @@ def auth_check():
     """Проверка пароля: верный пароль разблокирует анализ; 123654+ — вход в режим смены пароля."""
     if not request.json:
         return jsonify({'error': 'Требуется JSON'}), 400
+    if not ENV_ACCESS_PASSWORD:
+        return jsonify({'error': 'APP_ACCESS_PASSWORD не задан в окружении'}), 503
     password = (request.json.get('password') or '').strip()
     if password == ADMIN_KEY:
         return jsonify({'ok': True, 'admin': True})
@@ -1608,7 +1601,7 @@ def auth_check():
 
 @app.route('/api/auth/change-password', methods=['POST'])
 def auth_change_password():
-    """Смена пароля доступа к анализу (только при знании кода администратора)."""
+    """Смена пароля доступа через API отключена (единый источник — env)."""
     if not request.json:
         return jsonify({'error': 'Требуется JSON'}), 400
     admin_key = (request.json.get('admin_key') or '').strip()
@@ -1617,7 +1610,10 @@ def auth_change_password():
         return jsonify({'error': 'Неверный код администратора'}), 403
     if not new_password:
         return jsonify({'error': 'Новый пароль не может быть пустым'}), 400
-    set_stored_password(new_password)
+    try:
+        set_stored_password(new_password)
+    except RuntimeError as e:
+        return jsonify({'error': str(e)}), 409
     return jsonify({'ok': True})
 
 
