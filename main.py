@@ -1576,6 +1576,63 @@ def set_stored_password(new_password):
 analysis_results = {}
 analysis_status = {}
 analysis_costs = {}  # Хранилище расходов по задачам
+ANALYSIS_RESULTS_DIR = Path(__file__).parent / 'tasks'
+try:
+    ANALYSIS_RESULT_TTL_DAYS = max(1, int(os.getenv('ANALYSIS_RESULT_TTL_DAYS', '7')))
+except (TypeError, ValueError):
+    ANALYSIS_RESULT_TTL_DAYS = 7
+
+
+def _result_file_path(task_id):
+    """Путь к файлу с результатом анализа для конкретной задачи."""
+    safe_task_id = "".join(ch for ch in str(task_id) if ch.isdigit())
+    return ANALYSIS_RESULTS_DIR / f'analysis_{safe_task_id}.json'
+
+
+def save_analysis_result(task_id, result_data):
+    """Сохраняет результат анализа на диск для устойчивого экспорта."""
+    try:
+        ANALYSIS_RESULTS_DIR.mkdir(parents=True, exist_ok=True)
+        _result_file_path(task_id).write_text(
+            json.dumps(result_data, ensure_ascii=False),
+            encoding='utf-8'
+        )
+        cleanup_old_analysis_result_files()
+    except Exception as e:
+        logger.warning(f"[{task_id}] Не удалось сохранить результат на диск: {e}")
+
+
+def load_analysis_result(task_id):
+    """Загружает результат анализа с диска (если он есть)."""
+    try:
+        fp = _result_file_path(task_id)
+        if not fp.exists():
+            return None
+        data = json.loads(fp.read_text(encoding='utf-8'))
+        if not isinstance(data, dict):
+            return None
+        return data
+    except Exception as e:
+        logger.warning(f"[{task_id}] Не удалось загрузить результат с диска: {e}")
+        return None
+
+
+def cleanup_old_analysis_result_files():
+    """Удаляет старые файлы результатов analysis_*.json из tasks/."""
+    try:
+        if not ANALYSIS_RESULTS_DIR.exists():
+            return
+        now_ts = time.time()
+        ttl_seconds = ANALYSIS_RESULT_TTL_DAYS * 24 * 60 * 60
+        for file_path in ANALYSIS_RESULTS_DIR.glob('analysis_*.json'):
+            try:
+                age_seconds = now_ts - file_path.stat().st_mtime
+                if age_seconds > ttl_seconds:
+                    file_path.unlink(missing_ok=True)
+            except Exception as e:
+                logger.warning(f"Не удалось удалить старый файл результата {file_path.name}: {e}")
+    except Exception as e:
+        logger.warning(f"Ошибка очистки старых файлов результатов: {e}")
 
 @app.route('/')
 def index():
@@ -1970,6 +2027,7 @@ def run_analysis(task_id, company_url, initial_balance=None):
             'task_id': task_id,
             'verified_urls': list(verified_urls) if verified_urls else None
         }
+        save_analysis_result(task_id, analysis_results[task_id])
         
         # Устанавливаем статус "завершено"
         analysis_status[task_id] = {
@@ -2018,8 +2076,15 @@ def get_status(task_id):
     
     # Если анализ завершен, добавляем результат
     if status['status'] == 'completed':
+        result_data = None
         if task_id in analysis_results:
             result_data = analysis_results[task_id].copy()
+        else:
+            loaded = load_analysis_result(task_id)
+            if loaded:
+                analysis_results[task_id] = loaded
+                result_data = loaded.copy()
+        if result_data:
             status['result'] = result_data
             # Добавляем информацию о стоимости в статус и результат
             if 'cost' in result_data:
@@ -2040,6 +2105,10 @@ def get_status(task_id):
 @app.route('/api/export/<task_id>', methods=['GET'])
 def export_to_docx(task_id):
     """Экспорт результатов анализа в DOCX формат"""
+    if task_id not in analysis_results:
+        loaded = load_analysis_result(task_id)
+        if loaded:
+            analysis_results[task_id] = loaded
     if task_id not in analysis_results:
         return jsonify({'error': 'Результаты анализа не найдены'}), 404
     
@@ -2364,6 +2433,7 @@ if __name__ == '__main__':
     # Проверки PID файла и порта выполняем только в основном процессе
     # (до запуска reloader) или если debug отключен
     if not is_werkzeug_main or not FLASK_DEBUG:
+        cleanup_old_analysis_result_files()
         # Регистрируем обработчик для удаления PID файла при завершении
         atexit.register(remove_pid_file)
         
